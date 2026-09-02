@@ -223,6 +223,33 @@ def get_user(telegram_id):
         return None
 
 
+def get_employees():
+    """All employees, alphabetically."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, full_name, phone FROM users WHERE role='employee' ORDER BY full_name")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting employees: {e}")
+        return []
+
+
+def count_pending_corrections():
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) AS n FROM correction_requests WHERE status='PENDING'")
+        n = c.fetchone()['n']
+        conn.close()
+        return n
+    except Exception as e:
+        logger.error(f"Error counting pending corrections: {e}")
+        return 0
+
+
 def get_user_by_phone(phone):
     try:
         conn = get_connection()

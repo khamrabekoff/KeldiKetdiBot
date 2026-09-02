@@ -105,21 +105,19 @@ async def check_admin(user_id):
 
 async def get_main_menu_markup(role, user_id=None):
     if role == 'admin':
-        buttons = [
-            [msg.BTN_ADMIN_TODAY, msg.BTN_ADMIN_MONTH],
-            [msg.BTN_ADMIN_EMPLOYEES, msg.BTN_ADMIN_CORRECTIONS]
-        ]
-        return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False)
+        return ui.admin_keyboard()
     return ui.employee_keyboard(user_id)
 
 
 async def show_main_menu(update: Update, user_row):
-    """Admins get the menu keyboard; employees get their status card."""
+    """Everyone's home screen: employees get their status card, admins get the
+    live dashboard of who is working right now."""
     if user_row['role'] != 'admin':
         await send_employee_home(update, user_row)
         return
-    menu_markup = await get_main_menu_markup('admin', user_row['id'])
-    await update.message.reply_text("🛠 <b>Boshqaruv paneli</b>", reply_markup=menu_markup, parse_mode='HTML')
+    await update.message.reply_text(
+        ui.admin_dashboard_card(), reply_markup=ui.admin_keyboard(), parse_mode='HTML'
+    )
 
 
 # ==================== START & AUTH ====================
@@ -261,99 +259,100 @@ async def my_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ADMIN HANDLERS ====================
 
 async def admin_today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = utils.get_now().date()
-    rows = db.get_today_attendance(today)
-
-    if not rows:
-        await update.message.reply_text("Bugun hich kim kelmadi.")
-        return
-
-    report = f"📅 Bugungi hisobot ({today}):\n\n"
-    for row in rows:
-        name = row['full_name']
-        check_in = row['check_in'].strftime('%H:%M') if row['check_in'] else "--:--"
-        check_out = row['check_out'].strftime('%H:%M') if row['check_out'] else "--:--"
-
-        wage_str = ""
-        if row['total_wage']:
-            wage_str = f"| {row['total_wage']} $"
-        elif row['check_in'] and not row['check_out']:
-            now = utils.get_now()
-            rates = {
-                'salary_type': row['salary_type'] if row['salary_type'] else 'tariff',
-                'rate_n': row['rate_n'] if row['rate_n'] else 0,
-                'rate_m': row['rate_m'] if row['rate_m'] else 0,
-                'rate_k': row['rate_k'] if row['rate_k'] else 0,
-                'rate_overtime': row['rate_overtime'] if row['rate_overtime'] else 0,
-                'monthly_salary': row['monthly_salary'] if row['monthly_salary'] else 0,
-                'overtime_hourly_rate': row['overtime_hourly_rate'] if row['overtime_hourly_rate'] else 0,
-                'rate_per_minute': row['rate_per_minute'] if row['rate_per_minute'] else 0,
-            }
-            live_wage, _, _ = utils.calculate_wage(row['check_in'], now, rates)
-            wage_str = f"| ~{live_wage:.2f} $ (Ish jarayonida)"
-
-        stype = row['salary_type'] if row['salary_type'] else 'tariff'
-        stype_label = "Tarif" if stype == 'tariff' else ("Oylik" if stype == 'monthly' else "Minutlik")
-
-        report += f"👤 {name} ({stype_label}): {check_in} - {check_out} {wage_str}\n"
-
-    await update.message.reply_text(report)
+    """Live dashboard: who's working, who finished, who never showed up."""
+    await update.message.reply_text(
+        ui.admin_dashboard_card(), reply_markup=ui.admin_keyboard(), parse_mode='HTML'
+    )
 
 
 async def admin_month_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Month picker. Picking one shows the report straight away."""
     today = utils.get_now()
     buttons = []
 
     for i in range(6):
         y, m = today.year, today.month
-        m = m - i
+        m -= i
         while m <= 0:
             m += 12
             y -= 1
-
-        label = f"{y}-{m:02d}"
-        callback_data = f"adm_report_{y}-{m:02d}"
-
-        if len(buttons) > 0 and len(buttons[-1]) < 3:
-            buttons[-1].append(InlineKeyboardButton(label, callback_data=callback_data))
+        label = ui.fmt_month(datetime(y, m, 1))
+        cb = f"rep:{y}-{m:02d}"
+        if buttons and len(buttons[-1]) < 2:
+            buttons[-1].append(InlineKeyboardButton(label, callback_data=cb))
         else:
-            buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+            buttons.append([InlineKeyboardButton(label, callback_data=cb)])
 
-    await update.message.reply_text("Hisobot oyini tanlang:", reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text(
+        "📊 <b>Hisobot oyini tanlang:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode='HTML',
+    )
+
+
+def _month_start(ym):
+    """'2026-09' -> date(2026, 9, 1)"""
+    return datetime.strptime(ym, "%Y-%m").date()
 
 
 async def admin_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the monthly report for the chosen month, with export options."""
     query = update.callback_query
     await query.answer()
 
+    # Accepts both the new 'rep:YYYY-MM' and the legacy 'adm_report_YYYY-MM'
+    # so month buttons sent before this redesign still work.
     data = query.data
-    _, date_str = data.split('_report_')
+    ym = data.split('_report_')[-1] if '_report_' in data else data.split(':', 1)[1]
+    context.user_data['report_month'] = ym
 
-    context.user_data['report_month'] = date_str
+    buttons = [[
+        InlineKeyboardButton("📥 Excel", callback_data=f"repx:xls:{ym}"),
+        InlineKeyboardButton("📄 PDF", callback_data=f"repx:pdf:{ym}"),
+    ]]
+    try:
+        await query.edit_message_text(
+            ui.admin_month_report_card(_month_start(ym)),
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode='HTML',
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
 
-    buttons = [["Telegram", "Excel"], [msg.BTN_BACK]]
-    await query.message.reply_text(f"Tanlangan oy: {date_str}. Formatni tanlang:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False))
+
+async def report_export_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send the chosen month's report as an Excel or PDF file."""
+    query = update.callback_query
+    await query.answer("Tayyorlanmoqda…")
+    _, fmt, ym = query.data.split(':', 2)
+    start_date = _month_start(ym)
+
+    if fmt == 'xls':
+        bio = excel_export.create_monthly_report_excel(start_date)
+        filename, label = f"hisobot_{ym.replace('-', '_')}.xlsx", "Excel"
+    else:
+        bio = pdf_export.create_monthly_pdf_report(start_date)
+        filename, label = f"hisobot_{ym.replace('-', '_')}.pdf", "PDF"
+
+    if not bio:
+        await query.message.reply_text(f"❌ {label} hisobotini yaratib bo'lmadi (ma'lumot yo'q).")
+        return
+
+    await query.message.reply_document(document=bio, filename=filename)
+    audit.log_action(query.from_user.id, 'report_generated', f"{label} hisobot: {ym}")
 
 
 async def admin_employees_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = db.get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, full_name FROM users WHERE role='employee'")
-    users = c.fetchall()
-    conn.close()
-
-    if not users:
-        await update.message.reply_text("Xodimlar yo'q.")
-    else:
-        keyboard = []
-        for u in users:
-            keyboard.append([InlineKeyboardButton(u['full_name'], callback_data=f"edit_{u['id']}")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Xodimni tanlang (tahrirlash yoki o'chirish uchun):", reply_markup=reply_markup)
+    text, keyboard = ui.admin_employee_list()
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
 
     buttons = [[msg.BTN_ADMIN_ADD_EMP], [msg.BTN_BACK]]
-    await update.message.reply_text("Boshqaruv:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False))
+    await update.message.reply_text(
+        "➕ <i>Yangi xodim qo'shish uchun pastdagi tugmani bosing.</i>",
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False),
+        parse_mode='HTML',
+    )
 
 
 # ==================== MANAGE EMPLOYEE (edit rates / attendance / delete) ====================
@@ -380,17 +379,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("edit_"):
             user_id = int(data.split("_")[1])
             context.user_data['edit_user_id'] = user_id
-            u = db.get_user(user_id)
-            name = u['full_name'] if u else "Xodim"
 
             buttons = [
-                [InlineKeyboardButton(msg.BTN_ADMIN_EDIT_RATES_MENU, callback_data=f"act_rates_{user_id}")],
-                [InlineKeyboardButton(msg.BTN_ADMIN_EDIT_ATT_MENU, callback_data=f"act_att_{user_id}")],
-                [InlineKeyboardButton(msg.BTN_ADMIN_DELETE_EMP_MENU, callback_data=f"del_{user_id}")]
+                [
+                    InlineKeyboardButton("💵 Stavka", callback_data=f"act_rates_{user_id}"),
+                    InlineKeyboardButton("📝 Vaqt", callback_data=f"act_att_{user_id}"),
+                ],
+                [InlineKeyboardButton("❌ O'chirish", callback_data=f"del_{user_id}")],
             ]
             await query.edit_message_text(
-                text=msg.MSG_CHOOSE_ACTION.format(name=name),
-                reply_markup=InlineKeyboardMarkup(buttons)
+                text=ui.admin_employee_card(user_id),
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode='HTML',
             )
             return ACTION_MENU
 
@@ -1123,15 +1123,16 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             return
 
-        if text == msg.BTN_ADMIN_TODAY and user['role'] == 'admin':
+        is_admin = user['role'] == 'admin'
+        if is_admin and text in (ui.BTN_ADMIN_TODAY, msg.BTN_ADMIN_TODAY):
             await admin_today_handler(update, context)
-        elif text == msg.BTN_ADMIN_MONTH and user['role'] == 'admin':
+        elif is_admin and text in (ui.BTN_ADMIN_REPORT, msg.BTN_ADMIN_MONTH):
             await admin_month_handler(update, context)
-        elif text == msg.BTN_ADMIN_EMPLOYEES and user['role'] == 'admin':
+        elif is_admin and text in (ui.BTN_ADMIN_EMPLOYEES, msg.BTN_ADMIN_EMPLOYEES):
             await admin_employees_handler(update, context)
-        elif text == msg.BTN_ADMIN_CORRECTIONS and user['role'] == 'admin':
+        elif is_admin and text in (ui.BTN_ADMIN_CORRECTIONS, msg.BTN_ADMIN_CORRECTIONS):
             await admin_correction_list_handler(update, context)
-        elif text in ["Telegram", "Excel"] and user['role'] == 'admin':
+        elif is_admin and text in ("Telegram", "Excel"):
             await handle_report_format(update, context)
         # New employee keyboard. The old labels are still accepted below so
         # anyone whose Telegram is still showing the previous keyboard (it
@@ -1494,6 +1495,8 @@ def create_application():
 
         # Callback handlers
         app_config.add_handler(CallbackQueryHandler(preview_callback, pattern="^prev:"))
+        app_config.add_handler(CallbackQueryHandler(report_export_callback, pattern="^repx:"))
+        app_config.add_handler(CallbackQueryHandler(admin_report_callback, pattern="^rep:"))
         app_config.add_handler(CallbackQueryHandler(admin_report_callback, pattern="^adm_report_"))
         app_config.add_handler(CallbackQueryHandler(approve_request_callback, pattern="^approve_req_"))
         app_config.add_handler(CallbackQueryHandler(reject_request_callback, pattern="^reject_req_"))

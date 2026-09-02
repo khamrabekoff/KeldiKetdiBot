@@ -173,3 +173,165 @@ def employee_stats_card(user_id):
         text += "\n<i>Bu oyda hali ma'lumot yo'q.</i>"
 
     return text
+
+
+# ==================== ADMIN ====================
+
+BTN_ADMIN_TODAY = "🏠 Bugun"
+BTN_ADMIN_REPORT = "📊 Hisobot"
+BTN_ADMIN_EMPLOYEES = "👥 Xodimlar"
+BTN_ADMIN_CORRECTIONS = "🔔 Tuzatishlar"
+
+
+def admin_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [BTN_ADMIN_TODAY, BTN_ADMIN_REPORT],
+            [BTN_ADMIN_EMPLOYEES, BTN_ADMIN_CORRECTIONS],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def admin_dashboard_card():
+    """Live 'who is working right now' view - the admin's home screen."""
+    now = utils.get_now()
+    today = now.date()
+    employees = db.get_employees()
+
+    working, done, absent = [], [], []
+    day_total = 0.0
+
+    for emp in employees:
+        row = db.get_daily_attendance_for_user(emp['id'], today)
+        if not row or not row['check_in']:
+            absent.append(emp['full_name'])
+            continue
+        if row['check_out']:
+            wage = row['total_wage'] or 0
+            done.append((emp['full_name'], row['check_in'], row['check_out'], wage))
+        else:
+            rates = db.get_db_rates(emp['id'])
+            wage, _, _ = utils.calculate_wage(row['check_in'], now, rates)
+            working.append((emp['full_name'], row['check_in'], wage))
+        day_total += wage
+
+    text = (
+        f"🛠 <b>BOSHQARUV PANELI</b>\n"
+        f"<i>{fmt_date(now)} · {now.strftime('%H:%M')}</i>\n"
+        f"{'━' * 18}\n"
+    )
+
+    if working:
+        text += f"\n🟢 <b>Ishlayapti ({len(working)})</b>\n"
+        for name, ci, wage in working:
+            text += f"<code>{name[:12]:<12} {ci.strftime('%H:%M')}  {fmt_money(wage):>7}</code>\n"
+
+    if done:
+        text += f"\n✅ <b>Ish tugatgan ({len(done)})</b>\n"
+        for name, ci, co, wage in done:
+            span = f"{ci.strftime('%H:%M')}-{co.strftime('%H:%M')}"
+            text += f"<code>{name[:12]:<12} {span}  {fmt_money(wage):>7}</code>\n"
+
+    if absent:
+        text += f"\n⚪️ <b>Kelmagan ({len(absent)})</b>\n"
+        text += "".join(f"<code>{n}</code>\n" for n in absent)
+
+    if not employees:
+        text += "\n<i>Hali xodimlar qo'shilmagan.</i>\n"
+
+    text += f"\n{'━' * 18}\n💵 <b>Bugun jami: {fmt_money(day_total)}</b>"
+
+    pending = db.count_pending_corrections()
+    if pending:
+        text += f"\n🔔 <b>Yangi so'rovlar: {pending}</b>"
+
+    return text
+
+
+def admin_employee_list():
+    """Employee picker with a live status dot on each name."""
+    employees = db.get_employees()
+    if not employees:
+        return "👥 <b>XODIMLAR</b>\n\n<i>Hali xodimlar qo'shilmagan.</i>", None
+
+    text = f"👥 <b>XODIMLAR ({len(employees)})</b>\n<i>Batafsil ko'rish uchun tanlang:</i>"
+    keyboard = []
+    for emp in employees:
+        dot = "🟢" if db.is_user_checked_in(emp['id']) else "⚪️"
+        keyboard.append([InlineKeyboardButton(
+            f"{dot}  {emp['full_name']}", callback_data=f"edit_{emp['id']}"
+        )])
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def admin_employee_card(emp_id):
+    """Detail card for one employee: contact, rate, live status, month totals."""
+    emp = db.get_user(emp_id)
+    if not emp:
+        return "❌ Xodim topilmadi."
+
+    now = utils.get_now()
+    rates = db.get_db_rates(emp_id)
+    row = db.get_daily_attendance_for_user(emp_id, now.date())
+
+    if row and row['check_in'] and not row['check_out']:
+        status = f"🟢 Hozir ishlayapti — <b>{row['check_in'].strftime('%H:%M')}</b> dan"
+    elif row and row['check_out']:
+        status = f"✅ Bugun ish tugatgan — {row['check_in'].strftime('%H:%M')}-{row['check_out'].strftime('%H:%M')}"
+    else:
+        status = "⚪️ Bugun kelmagan"
+
+    month_rows = db.get_user_month_details(emp_id, now.replace(day=1).date())
+    days = total_wage = total_mins = 0
+    for r in month_rows:
+        if r['check_in'] and r['check_out']:
+            days += 1
+            total_wage += r['total_wage'] or 0
+            total_mins += worked_minutes(r['check_in'], r['check_out'])
+
+    return (
+        f"👤 <b>{emp['full_name'].upper()}</b>\n"
+        f"{'━' * 18}\n\n"
+        f"📞 <code>{emp['phone']}</code>\n"
+        f"💵 Stavka: <b>{fmt_rate(rates)}</b>\n"
+        f"{status}\n\n"
+        f"📊 <b>{fmt_month(now)}</b>\n"
+        f"<code>Kunlar:  {days}</code>\n"
+        f"<code>Vaqt:    {fmt_duration(total_mins)}</code>\n"
+        f"<code>Hisob:   {fmt_money(total_wage)}</code>"
+    )
+
+
+def admin_month_report_card(start_date):
+    """Per-employee monthly totals with a grand total."""
+    rows = db.get_month_attendance_details(start_date)
+    if not rows:
+        return f"📊 <b>{fmt_month(start_date)}</b>\n\n<i>Bu oyda ma'lumot yo'q.</i>"
+
+    per_employee = {}
+    for r in rows:
+        name = r['full_name']
+        bucket = per_employee.setdefault(name, {'wage': 0.0, 'days': 0, 'mins': 0.0})
+        if r['check_in'] and r['check_out']:
+            bucket['days'] += 1
+            bucket['wage'] += r['total_wage'] or 0
+            bucket['mins'] += worked_minutes(r['check_in'], r['check_out'])
+
+    text = (
+        f"📊 <b>OYLIK HISOBOT</b>\n"
+        f"<i>{fmt_month(start_date)}</i>\n"
+        f"{'━' * 18}\n\n"
+    )
+    grand = 0.0
+    for name, b in sorted(per_employee.items(), key=lambda kv: -kv[1]['wage']):
+        grand += b['wage']
+        text += (
+            f"👤 <b>{name}</b>\n"
+            f"<code>  {b['days']} kun · {fmt_duration(b['mins'])}</code>\n"
+            f"<code>  {fmt_money(b['wage'])}</code>\n\n"
+        )
+
+    text += f"{'━' * 18}\n💵 <b>JAMI: {fmt_money(grand)}</b>"
+    return text
