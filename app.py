@@ -60,28 +60,61 @@ _ptb_ready = False
 _stats = {'updates': 0, 'inits': 0, 'last_ms': None, 'errors': 0}
 
 
+def _initialize_bot(retries=3):
+    """(Re)build PTB's client on our loop.
+
+    PythonAnywhere's outbound proxy occasionally answers 503, which used to
+    leave the Application half-built: our own flag said 'ready' while PTB's
+    internal state disagreed, and every later update then died with
+    'ExtBot is not properly initialized'. So we always tear down first, and
+    retry a transient proxy failure - initialize() has no user-visible side
+    effects, so retrying it is safe (unlike retrying an update)."""
+    global _ptb_ready
+    _ptb_ready = False
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            try:
+                _loop.run_until_complete(telegram_app.shutdown())
+            except Exception:
+                pass  # nothing to tear down on the very first run
+            _loop.run_until_complete(telegram_app.initialize())
+            _ptb_ready = True
+            _stats['inits'] += 1
+            logger.info("✅ Telegram client initialized (persists for this worker)")
+            return
+        except (NetworkError, TimedOut) as e:
+            last_err = e
+            logger.warning(f"initialize() attempt {attempt}/{retries} failed: {e}")
+            if attempt < retries:
+                _loop.run_until_complete(asyncio.sleep(0.6 * attempt))
+    raise last_err
+
+
 def run_sync(coro, timeout=25):
     """Run one PTB coroutine on the long-lived loop, initializing on first use."""
     global _ptb_ready
     with _loop_lock:
         if not _ptb_ready:
-            _loop.run_until_complete(telegram_app.initialize())
-            _ptb_ready = True
-            _stats['inits'] += 1
-            logger.info("✅ Telegram client initialized (persists for this worker)")
+            _initialize_bot()
         started = datetime.now()
         try:
             result = _loop.run_until_complete(asyncio.wait_for(coro, timeout))
             _stats['updates'] += 1
             _stats['last_ms'] = int((datetime.now() - started).total_seconds() * 1000)
             return result
+        except RuntimeError as e:
+            if "not properly initialized" not in str(e):
+                raise
+            _stats['errors'] += 1
+            _ptb_ready = False  # rebuild on the next update
+            raise
         except (NetworkError, TimedOut):
             _stats['errors'] += 1
-            # The HTTP client may have gone stale (long idle, connection reset).
-            # Force a fresh initialize() on the NEXT request rather than retrying
-            # here - a retry could re-run handler side effects that already
-            # happened (e.g. sending a reply twice). Telegram re-delivers the
-            # update on its own after we return 500.
+            # Client may have gone stale (long idle, connection reset). Rebuild
+            # on the NEXT update rather than retrying this one - a retry could
+            # repeat handler side effects that already happened (e.g. sending a
+            # reply twice). Telegram re-delivers after we answer 500.
             _ptb_ready = False
             raise
 
