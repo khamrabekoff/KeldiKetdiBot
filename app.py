@@ -21,7 +21,7 @@ import analytics
 import audit
 import excel_export
 import pdf_export
-from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_DOMAIN, ADMIN_SECRET, FLASK_PORT, CRON_SECRET, DEPLOY_SECRET
+from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_DOMAIN, ADMIN_SECRET, FLASK_PORT, CRON_SECRET, DEPLOY_SECRET, BOT_VERSION
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,6 +54,9 @@ _loop_lock = threading.Lock()  # WSGI may hand us concurrent requests per proces
 _ptb_ready = False
 
 
+_stats = {'updates': 0, 'inits': 0, 'last_ms': None, 'errors': 0}
+
+
 def run_sync(coro, timeout=25):
     """Run one PTB coroutine on the long-lived loop, initializing on first use."""
     global _ptb_ready
@@ -61,10 +64,16 @@ def run_sync(coro, timeout=25):
         if not _ptb_ready:
             _loop.run_until_complete(telegram_app.initialize())
             _ptb_ready = True
+            _stats['inits'] += 1
             logger.info("✅ Telegram client initialized (persists for this worker)")
+        started = datetime.now()
         try:
-            return _loop.run_until_complete(asyncio.wait_for(coro, timeout))
+            result = _loop.run_until_complete(asyncio.wait_for(coro, timeout))
+            _stats['updates'] += 1
+            _stats['last_ms'] = int((datetime.now() - started).total_seconds() * 1000)
+            return result
         except (NetworkError, TimedOut):
+            _stats['errors'] += 1
             # The HTTP client may have gone stale (long idle, connection reset).
             # Force a fresh initialize() on the NEXT request rather than retrying
             # here - a retry could re-run handler side effects that already
@@ -1223,6 +1232,28 @@ def webhook():
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'bot': 'running'}), 200
+
+
+@app.route('/status/<secret>', methods=['GET'])
+def status(secret):
+    """Runtime diagnostics - lets deploys be verified without reading server
+    logs by hand. 'inits' staying at 1 while 'updates' climbs is the signal
+    that the long-lived event loop is doing its job (see run_sync)."""
+    if secret != DEPLOY_SECRET:
+        return 'Forbidden', 403
+    conn = db.get_connection()
+    c = conn.cursor()
+    c.execute("SELECT role, COUNT(*) AS n FROM users GROUP BY role")
+    roles = {row['role']: row['n'] for row in c.fetchall()}
+    conn.close()
+    return jsonify({
+        'status': 'ok',
+        'version': BOT_VERSION,
+        'server_time_tashkent': utils.get_now().strftime('%Y-%m-%d %H:%M:%S'),
+        'telegram_client_ready': _ptb_ready,
+        'runtime': _stats,
+        'users': roles,
+    }), 200
 
 
 # ==================== SELF-DEPLOY (git pull + reload) ====================
