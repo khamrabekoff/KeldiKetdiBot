@@ -379,15 +379,10 @@ async def report_export_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def admin_employees_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One message, and the admin's main keyboard stays put - adding an
+    employee is an inline button on the list itself."""
     text, keyboard = ui.admin_employee_list()
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
-
-    buttons = [[msg.BTN_ADMIN_ADD_EMP], [msg.BTN_BACK]]
-    await update.message.reply_text(
-        "➕ <i>Yangi xodim qo'shish uchun pastdagi tugmani bosing.</i>",
-        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False),
-        parse_mode='HTML',
-    )
 
 
 # ==================== MANAGE EMPLOYEE (edit rates / attendance / delete) ====================
@@ -812,10 +807,12 @@ async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Bu buyruq faqat administrator uchun.")
         return
     try:
-        text = analytics.format_all_stats_summary(days=30)
-        await update.message.reply_text(text, parse_mode='HTML')
+        await update.message.reply_text(
+            ui.analytics_card(analytics.get_all_employees_stats(days=30), days=30),
+            parse_mode='HTML',
+        )
     except Exception as e:
-        logger.error(f"Error in cmd_analytics: {e}")
+        logger.error(f"Error in cmd_analytics: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Xatolik: {e}")
 
 
@@ -845,10 +842,12 @@ async def cmd_employee_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         employee_id = matches[0]['id']
-        text = analytics.format_stats(analytics.get_employee_stats(employee_id, days=30))
-        await update.message.reply_text(text, parse_mode='HTML')
+        await update.message.reply_text(
+            ui.employee_analytics_card(analytics.get_employee_stats(employee_id, days=30)),
+            parse_mode='HTML',
+        )
     except Exception as e:
-        logger.error(f"Error in cmd_employee_stats: {e}")
+        logger.error(f"Error in cmd_employee_stats: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Xatolik: {e}")
 
 
@@ -892,6 +891,16 @@ async def cmd_export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg.MSG_INPUT_NAME, reply_markup=ReplyKeyboardRemove())
+    return ADD_NAME
+
+
+async def start_add_employee_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Same flow, entered from the inline button on the employee list."""
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
+    await query.message.reply_text(msg.MSG_INPUT_NAME, reply_markup=ReplyKeyboardRemove())
     return ADD_NAME
 
 
@@ -1234,8 +1243,6 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_correction_list_handler(update, context)
         elif is_admin and text == ui.BTN_ADMIN_SETTINGS:
             await admin_settings_handler(update, context)
-        elif is_admin and text in ("Telegram", "Excel"):
-            await handle_report_format(update, context)
         # New employee keyboard. The old labels are still accepted below so
         # anyone whose Telegram is still showing the previous keyboard (it
         # persists client-side until they interact) doesn't hit a dead button.
@@ -1261,104 +1268,6 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Xatolik yuz berdi. Qayta urinib ko'ring yoki /start bosing.")
         except Exception:
             pass
-
-
-async def handle_report_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    target_date = utils.get_now().replace(day=1)
-    if 'report_month' in context.user_data:
-        try:
-            ym = context.user_data['report_month']
-            dt = datetime.strptime(ym, "%Y-%m")
-            target_date = dt.date()
-        except:
-            pass
-    start_date = target_date
-
-    if text == "Telegram":
-        rows_detailed = db.get_month_attendance_details(start_date)
-        if not rows_detailed:
-            await update.message.reply_text("Bu oyda ma'lumot yo'q.")
-            return
-        report = "📅 Oylik hisobot:\n\n"
-        overall_total = 0
-        user_map = {}
-        for r in rows_detailed:
-            nm = r['full_name']
-            if nm not in user_map:
-                user_map[nm] = []
-            user_map[nm].append(r)
-        for name, records in user_map.items():
-            stype = records[0]['salary_type'] if records[0]['salary_type'] else 'tariff'
-            stype_label = "Tarif" if stype == 'tariff' else ("Oylik" if stype == 'monthly' else "Minutlik")
-            report += f"👤 <b>{name}</b> ({stype_label}):\n"
-            u_sum = 0
-            for row in records:
-                d = row['date'].strftime('%d.%m')
-                w = row['total_wage']
-                ci = row['check_in'].strftime('%H:%M') if row['check_in'] else "--"
-                co = row['check_out'].strftime('%H:%M') if row['check_out'] else "--"
-                report += f"  🔹 {d}: {ci}-{co} | {w:.2f}$\n"
-                u_sum += w
-            report += f"  💰 Jami: {u_sum:.2f} $\n\n"
-            overall_total += u_sum
-        report += f"🏁 Umumiy to'lov: {overall_total:.2f} $"
-        await update.message.reply_text(report, parse_mode='HTML')
-    elif text == "Excel":
-        rows = db.get_month_attendance_details(start_date)
-        if not rows:
-            await update.message.reply_text("Bu oyda ma'lumot yo'q.")
-            return
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.append(["Ism", "Sana", "Keldi", "Ketdi", "Turi", "Hisoblash tafsiloti", "Jami ($)"])
-        header_font = Font(size=14, bold=True)
-        row_font = Font(size=12)
-        for cell in ws[1]:
-            cell.font = header_font
-        ws.column_dimensions['A'].width = 25
-        ws.column_dimensions['B'].width = 12
-        ws.column_dimensions['C'].width = 10
-        ws.column_dimensions['D'].width = 10
-        ws.column_dimensions['E'].width = 15
-        ws.column_dimensions['F'].width = 40
-        ws.column_dimensions['G'].width = 12
-        for row in rows:
-            rates = {
-                'salary_type': row['salary_type'] if row['salary_type'] else 'tariff',
-                'rate_n': row['rate_n'] if row['rate_n'] else 0,
-                'rate_m': row['rate_m'] if row['rate_m'] else 0,
-                'rate_k': row['rate_k'] if row['rate_k'] else 0,
-                'rate_overtime': row['rate_overtime'] if row['rate_overtime'] else 0,
-                'monthly_salary': row['monthly_salary'] if row['monthly_salary'] else 0,
-                'overtime_hourly_rate': row['overtime_hourly_rate'] if row['overtime_hourly_rate'] else 0,
-                'rate_per_minute': row['rate_per_minute'] if row['rate_per_minute'] else 0,
-            }
-            check_in = row['check_in']
-            check_out = row['check_out']
-            stype = rates['salary_type']
-            stype_label = "Tarif" if stype == 'tariff' else ("Oylik" if stype == 'monthly' else "Minutlik")
-            tafsilot = ""
-            if check_in and check_out:
-                _, _, breakdown = utils.calculate_wage(check_in, check_out, rates)
-                total = row['total_wage']
-                if stype == 'per_minute':
-                    total_mins = (check_out - check_in).total_seconds() / 60.0
-                    tafsilot = f"{total_mins:.0f} min x {rates['rate_per_minute']}"
-                elif stype == 'monthly':
-                    tafsilot = f"Reg: {breakdown.get('regular', 0):.2f}, OT: {breakdown.get('ot', 0):.2f}"
-                else:
-                    tafsilot = f"N:{breakdown['n']:.1f}, M:{breakdown['m']:.1f}, K:{breakdown['k']:.1f}, OT:{breakdown['ot']:.1f}"
-            else:
-                total = 0
-                tafsilot = "Hali chiqmagan"
-            ws.append([row['full_name'], row['date'], check_in.strftime("%H:%M") if check_in else "", check_out.strftime("%H:%M") if check_out else "", stype_label, tafsilot, total])
-            for cell in ws[ws.max_row]:
-                cell.font = row_font
-        bio = BytesIO()
-        wb.save(bio)
-        bio.seek(0)
-        await update.message.reply_document(document=bio, filename=f"hisobot_{start_date.strftime('%Y_%m')}.xlsx")
 
 
 # ==================== FLASK WEBHOOK ====================
@@ -1661,7 +1570,10 @@ def create_application():
 
         # Add Employee Conversation
         add_emp_handler = ConversationHandler(
-            entry_points=[MessageHandler(filters.Regex(f"^{msg.BTN_ADMIN_ADD_EMP}$"), start_add_employee)],
+            entry_points=[
+                MessageHandler(filters.Regex(f"^{re.escape(msg.BTN_ADMIN_ADD_EMP)}$"), start_add_employee),
+                CallbackQueryHandler(start_add_employee_cb, pattern="^addemp$"),
+            ],
             states={
                 ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_name)],
                 ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_phone)],

@@ -270,10 +270,19 @@ def admin_dashboard_card():
 
 
 def admin_employee_list():
-    """Employee picker with a live status dot on each name."""
+    """Employee picker with a live status dot on each name.
+
+    'Add employee' is an inline button here rather than a bottom-keyboard one,
+    so opening this screen doesn't replace the admin's main menu (which used to
+    force a trip through an 'Ortga' button to get back)."""
     employees = db.get_employees()
+    add_button = [InlineKeyboardButton("➕ Yangi xodim", callback_data="addemp")]
+
     if not employees:
-        return "👥 <b>XODIMLAR</b>\n\n<i>Hali xodimlar qo'shilmagan.</i>", None
+        return (
+            "👥 <b>XODIMLAR</b>\n\n<i>Hali xodimlar qo'shilmagan.</i>",
+            InlineKeyboardMarkup([add_button]),
+        )
 
     text = f"👥 <b>XODIMLAR ({len(employees)})</b>\n<i>Batafsil ko'rish uchun tanlang:</i>"
     keyboard = []
@@ -282,6 +291,7 @@ def admin_employee_list():
         keyboard.append([InlineKeyboardButton(
             f"{dot}  {emp['full_name']}", callback_data=f"edit_{emp['id']}"
         )])
+    keyboard.append(add_button)
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -321,6 +331,69 @@ def admin_employee_card(emp_id):
         f"<code>Vaqt:    {fmt_duration(total_mins)}</code>\n"
         f"<code>Hisob:   {fmt_money(total_wage)}</code>"
     )
+
+
+def analytics_card(all_stats, days=30):
+    """Team-wide analytics: totals plus earnings and punctuality rankings."""
+    if not all_stats:
+        return f"📈 <b>TAHLIL</b>\n\n<i>Hali ma'lumot yo'q.</i>"
+
+    total_wage = sum(s['total_wage'] for s in all_stats)
+    total_mins = sum(s['total_minutes'] for s in all_stats)
+    total_days = sum(s['days_worked'] for s in all_stats)
+
+    text = (
+        f"📈 <b>TAHLIL</b>\n"
+        f"<i>So'nggi {days} kun</i>\n"
+        f"{'━' * 18}\n\n"
+        f"👥 Xodimlar: <b>{len(all_stats)}</b>\n"
+        f"📅 Ishlangan kunlar: <b>{total_days}</b>\n"
+        f"⏱ Jami vaqt: <b>{fmt_duration(total_mins)}</b>\n"
+        f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
+    )
+
+    text += f"\n{'━' * 18}\n💵 <b>Ish haqi bo'yicha</b>\n"
+    for i, s in enumerate(all_stats, 1):
+        text += f"<code>{i}. {s['name'][:12]:<12} {fmt_money(s['total_wage']):>8}</code>\n"
+
+    punctual = sorted(all_stats, key=lambda s: (s['late_days'], -s['days_worked']))
+    text += f"\n{'━' * 18}\n⏰ <b>Vaqtida kelish bo'yicha</b>\n"
+    for i, s in enumerate(punctual, 1):
+        label = "kechikishsiz" if s['late_days'] == 0 else f"{s['late_days']} marta kechikkan"
+        text += f"<code>{i}. {s['name'][:12]:<12}</code> <i>{label}</i>\n"
+
+    return text
+
+
+def employee_analytics_card(stats):
+    """Deep-dive card for a single employee."""
+    if not stats:
+        return "❌ Xodim topilmadi."
+
+    text = (
+        f"📈 <b>{stats['name'].upper()}</b>\n"
+        f"<i>So'nggi {stats['days']} kun</i>\n"
+        f"{'━' * 18}\n\n"
+        f"📞 <code>{stats['phone']}</code>\n"
+        f"💵 Stavka: <b>{fmt_rate(stats['rates'])}</b>\n\n"
+        f"📅 Ishlangan kunlar: <b>{stats['days_worked']}</b>\n"
+        f"⏱ Jami vaqt: <b>{fmt_duration(stats['total_minutes'])}</b>\n"
+        f"💰 Jami ish haqi: <b>{fmt_money(stats['total_wage'])}</b>\n"
+    )
+
+    if stats['days_worked']:
+        text += (
+            f"\n{'━' * 18}\n<b>Kunlik o'rtacha</b>\n"
+            f"⏱ Vaqt: <b>{fmt_duration(stats['avg_minutes_per_day'])}</b>\n"
+            f"💰 Ish haqi: <b>{fmt_money(stats['avg_wage_per_day'])}</b>\n"
+        )
+
+    if stats['late_days']:
+        text += f"\n⚠️ Kechikkan kunlar: <b>{stats['late_days']}</b>"
+    else:
+        text += f"\n✅ <b>Hech qachon kechikmagan</b>"
+
+    return text
 
 
 def admin_month_report_card(start_date):
