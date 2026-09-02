@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+import re
 import subprocess
 import threading
 from datetime import datetime, time, timedelta
@@ -8,7 +9,7 @@ from io import BytesIO
 
 from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
 import openpyxl
@@ -21,6 +22,7 @@ import analytics
 import audit
 import excel_export
 import pdf_export
+import ui
 from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_DOMAIN, ADMIN_SECRET, FLASK_PORT, CRON_SECRET, DEPLOY_SECRET, BOT_VERSION
 
 logging.basicConfig(
@@ -107,26 +109,17 @@ async def get_main_menu_markup(role, user_id=None):
             [msg.BTN_ADMIN_TODAY, msg.BTN_ADMIN_MONTH],
             [msg.BTN_ADMIN_EMPLOYEES, msg.BTN_ADMIN_CORRECTIONS]
         ]
-    else:
-        is_checked_in = False
-        if user_id:
-            is_checked_in = db.is_user_checked_in(user_id)
-
-        action_btn = msg.BTN_CHECK_OUT if is_checked_in else msg.BTN_CHECK_IN
-
-        buttons = [
-            [action_btn],
-            [msg.BTN_TODAY_STAT, msg.BTN_MONTH_STAT],
-            [msg.BTN_MY_STATS, msg.BTN_CORRECTION_REQUEST]
-        ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False)
+        return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=False)
+    return ui.employee_keyboard(user_id)
 
 
 async def show_main_menu(update: Update, user_row):
-    role = user_row['role']
-    user_id = user_row['id']
-    menu_markup = await get_main_menu_markup(role, user_id)
-    await update.message.reply_text(f"Menu ({role}):", reply_markup=menu_markup)
+    """Admins get the menu keyboard; employees get their status card."""
+    if user_row['role'] != 'admin':
+        await send_employee_home(update, user_row)
+        return
+    menu_markup = await get_main_menu_markup('admin', user_row['id'])
+    await update.message.reply_text("🛠 <b>Boshqaruv paneli</b>", reply_markup=menu_markup, parse_mode='HTML')
 
 
 # ==================== START & AUTH ====================
@@ -134,12 +127,29 @@ async def show_main_menu(update: Update, user_row):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_user = db.get_user(user.id)
-    if db_user:
-        await show_main_menu(update, db_user)
-    else:
+    if not db_user:
         button = KeyboardButton(msg.MSG_SEND_CONTACT, request_contact=True)
         reply_markup = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
         await update.message.reply_text(msg.MSG_WELCOME, reply_markup=reply_markup)
+        return
+
+    if db_user['role'] == 'admin':
+        await show_main_menu(update, db_user)
+    else:
+        await send_employee_home(update, db_user)
+
+
+# ==================== EMPLOYEE UI ====================
+
+async def send_employee_home(update: Update, db_user, note=None):
+    """Status card + the bottom keyboard, whose primary button reflects
+    whether they're currently checked in."""
+    text = ui.employee_status_card(db_user['id'], db_user['full_name'], note=note)
+    await update.message.reply_text(
+        text,
+        reply_markup=ui.employee_keyboard(db_user['id']),
+        parse_mode='HTML',
+    )
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,63 +187,47 @@ async def secret_admin_claim(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def check_in_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user = db.get_user(user_id)
     now = utils.get_now()
     result = db.check_in_user(user_id, now)
-    user = db.get_user(user_id)
-    menu_markup = await get_main_menu_markup(user['role'], user_id)
 
     if result['success']:
         cutoff = now.replace(hour=9, minute=15, second=0, microsecond=0)
         start_of_work = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        reply_txt = msg.MSG_CHECKED_IN.format(time=now.strftime("%H:%M"))
-
-        if start_of_work <= now < now.replace(hour=11, minute=0):
-            if now > cutoff:
-                reply_txt = msg.MSG_CHECKED_IN_LATE.format(time=now.strftime("%H:%M"))
-
-        await update.message.reply_text(reply_txt, reply_markup=menu_markup, parse_mode='HTML')
+        if start_of_work <= now < now.replace(hour=11, minute=0) and now > cutoff:
+            note = "⚠️ <i>Kechikdingiz.</i>"
+        else:
+            note = "<i>Hayrli ish!</i>"
     else:
-        await update.message.reply_text(result['message'], reply_markup=menu_markup)
+        note = f"⚠️ <i>{result['message']}</i>"
+
+    await send_employee_home(update, user, note=note)
 
 
 async def check_out_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user = db.get_user(user_id)
     now = utils.get_now()
     result = db.check_out_user(user_id, now)
-    user = db.get_user(user_id)
-    menu_markup = await get_main_menu_markup(user['role'], user_id)
 
     if result['success']:
-        await update.message.reply_text(
-            msg.MSG_CHECKED_OUT.format(
-                time=now.strftime("%H:%M"),
-                wage=f"{result['wage']:.2f}",
-                details=result['details']
-            ),
-            reply_markup=menu_markup
-        )
+        note = f"<i>{result['details']}</i>\n\n<i>Ish kuningiz uchun rahmat!</i>"
     else:
-        await update.message.reply_text(result['message'], reply_markup=menu_markup)
+        note = f"⚠️ <i>{result['message']}</i>"
+
+    await send_employee_home(update, user, note=note)
+
+
+async def employee_status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh the status card (live worked-time / earnings while checked in)."""
+    user = db.get_user(update.effective_user.id)
+    if user:
+        await send_employee_home(update, user)
 
 
 async def employee_today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    today_date = utils.get_now().date()
-    row = db.get_daily_attendance_for_user(user_id, today_date)
-    user = db.get_user(user_id)
-    menu_markup = await get_main_menu_markup(user['role'], user_id)
-
-    if row:
-        check_in = row['check_in'].strftime('%H:%M') if row['check_in'] else "--:--"
-        check_out = row['check_out'].strftime('%H:%M') if row['check_out'] else "--:--"
-        wage = row['total_wage'] if row['total_wage'] else 0
-        txt = (f"📅 Bugungi hisobot:\n\n"
-               f"📥 Kelish: {check_in}\n"
-               f"📤 Ketish: {check_out}\n"
-               f"💰 Hisoblangan pul: {wage} $")
-        await update.message.reply_text(txt, reply_markup=menu_markup)
-    else:
-        await update.message.reply_text("Bugun hali ma'lumot yo'q.", reply_markup=menu_markup)
+    """Today's status for an employee - same card as the 🏠 Holat button."""
+    await employee_status_handler(update, context)
 
 
 async def employee_month_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,10 +251,11 @@ async def employee_month_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def my_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    now = utils.get_now()
-    start_date = now.replace(day=1, hour=0, minute=0, second=0)
-    stats = db.get_employee_summary(user_id, start_date)
-    await update.message.reply_text(msg.MSG_MY_STATS.format(days=stats['days'], earned=f"{stats['earned']:.2f}"), parse_mode='HTML')
+    await update.message.reply_text(
+        ui.employee_stats_card(user_id),
+        reply_markup=ui.employee_keyboard(user_id),
+        parse_mode='HTML',
+    )
 
 
 # ==================== ADMIN HANDLERS ====================
@@ -1095,17 +1090,18 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_correction_list_handler(update, context)
         elif text in ["Telegram", "Excel"] and user['role'] == 'admin':
             await handle_report_format(update, context)
-        elif text == msg.BTN_CHECK_IN:
+        # New employee keyboard. The old labels are still accepted below so
+        # anyone whose Telegram is still showing the previous keyboard (it
+        # persists client-side until they interact) doesn't hit a dead button.
+        elif text in (ui.BTN_CHECK_IN, msg.BTN_CHECK_IN):
             await check_in_handler(update, context)
-        elif text == msg.BTN_CHECK_OUT or "Ketdim" in text:
+        elif text in (ui.BTN_CHECK_OUT, msg.BTN_CHECK_OUT) or "Ketdim" in text:
             await check_out_handler(update, context)
-        elif text == msg.BTN_TODAY_STAT:
-            await employee_today_handler(update, context)
-        elif text == msg.BTN_MONTH_STAT:
-            await employee_month_handler(update, context)
-        elif text == msg.BTN_MY_STATS:
+        elif text in (ui.BTN_STATUS, msg.BTN_TODAY_STAT):
+            await employee_status_handler(update, context)
+        elif text in (ui.BTN_MY_STATS, msg.BTN_MY_STATS, msg.BTN_MONTH_STAT):
             await my_stats_handler(update, context)
-        elif text == msg.BTN_CORRECTION_REQUEST:
+        elif text in (ui.BTN_CORRECTION, msg.BTN_CORRECTION_REQUEST):
             await correction_request_start(update, context)
         elif text == msg.BTN_BACK:
             await show_main_menu(update, user)
@@ -1407,7 +1403,10 @@ def create_application():
 
         # Correction Request Conversation
         correction_conv = ConversationHandler(
-            entry_points=[MessageHandler(filters.Regex(f"^{msg.BTN_CORRECTION_REQUEST}$"), correction_request_start)],
+            entry_points=[MessageHandler(
+                filters.Regex(f"^({re.escape(ui.BTN_CORRECTION)}|{re.escape(msg.BTN_CORRECTION_REQUEST)})$"),
+                correction_request_start,
+            )],
             states={
                 COR_REQ_DATE: [CallbackQueryHandler(cor_req_date_callback, pattern="^creq_dt_")],
                 COR_REQ_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, correction_request_in)],
