@@ -1221,7 +1221,13 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Tushunarsiz buyruq. Iltimos, menudan foydalaning yoki /start bosing.")
     except Exception as e:
-        logger.error(f"Error in unknown_text: {e}")
+        # Never leave the user staring at silence - a swallowed exception here
+        # looks exactly like "the bot is broken" from their side.
+        logger.error(f"Error in unknown_text: {type(e).__name__}: {e}", exc_info=True)
+        try:
+            await update.message.reply_text("⚠️ Xatolik yuz berdi. Qayta urinib ko'ring yoki /start bosing.")
+        except Exception:
+            pass
 
 
 async def handle_report_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1341,6 +1347,24 @@ def webhook():
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'bot': 'running'}), 200
+
+
+@app.route('/logs/<secret>', methods=['GET'])
+def logs(secret):
+    """Tail the server error log. Saves a round-trip through the user for
+    every diagnosis - they can't be expected to run console commands."""
+    if secret != DEPLOY_SECRET:
+        return 'Forbidden', 403
+    lines = int(request.args.get('n', 60))
+    path = f"/var/log/{WEBHOOK_DOMAIN.replace('.', '_').replace('_com', '.com')}.error.log"
+    # PythonAnywhere names it <domain>.error.log with dots intact
+    path = f"/var/log/{WEBHOOK_DOMAIN}.error.log"
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            tail = fh.readlines()[-lines:]
+        return ''.join(tail), 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        return f"Could not read {path}: {e}", 500, {'Content-Type': 'text/plain'}
 
 
 @app.route('/status/<secret>', methods=['GET'])
