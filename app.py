@@ -1509,9 +1509,10 @@ def _reminder_due(kind, today):
     return settings.get_flag(_reminder_flag_key(kind)) != today.isoformat()
 
 
-async def _send_reminders_job(kind=None):
+async def _send_reminders_job(kind=None, dry_run=False):
     """kind=None auto-selects by time of day, so a single scheduled task can
-    serve either slot depending on when it runs."""
+    serve either slot depending on when it runs. dry_run reports who *would*
+    be messaged without actually messaging them."""
     bot = telegram_app.bot
     now = utils.get_now()
     today = now.date()
@@ -1519,7 +1520,7 @@ async def _send_reminders_job(kind=None):
         kind = "morning" if now.hour < 12 else "evening"
 
     employees = _get_all_employees()
-    sent = 0
+    recipients = []
 
     for emp in employees:
         if kind == "morning":
@@ -1532,12 +1533,19 @@ async def _send_reminders_job(kind=None):
             if not db.is_user_checked_in(emp['id']):
                 continue
             text = EVENING_REMINDER_MSG
+
+        recipients.append(emp['full_name'])
+        if dry_run:
+            continue
         try:
             await bot.send_message(chat_id=emp['id'], text=text)
-            sent += 1
         except Exception as e:
             logger.warning(f"{kind} reminder failed for {emp['full_name']} ({emp['id']}): {e}")
 
+    if dry_run:
+        return kind, recipients, len(employees), False
+
+    sent = len(recipients)
     settings.set_flag(_reminder_flag_key(kind), today.isoformat())
     logger.info(f"✅ {kind} reminders sent to {sent}/{len(employees)} employees")
 
@@ -1606,10 +1614,16 @@ def cron_reminders(secret):
     kind = request.args.get('kind')
     if kind not in (None, 'morning', 'evening'):
         return jsonify({'status': 'error', 'message': "kind must be morning or evening"}), 400
+    dry = request.args.get('dry') in ('1', 'true', 'yes')
     try:
-        kind, sent, total, digest = run_sync(_send_reminders_job(kind), timeout=120)
+        kind, result, total, digest = run_sync(_send_reminders_job(kind, dry), timeout=120)
+        if dry:
+            return jsonify({
+                'status': 'ok', 'dry_run': True, 'kind': kind,
+                'would_notify': result, 'employees': total,
+            }), 200
         return jsonify({
-            'status': 'ok', 'kind': kind, 'sent': sent,
+            'status': 'ok', 'kind': kind, 'sent': result,
             'total': total, 'weekly_digest': digest,
         }), 200
     except Exception as e:
