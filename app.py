@@ -2,11 +2,13 @@ import logging
 import asyncio
 import os
 import subprocess
+import threading
 from datetime import datetime, time, timedelta
 from io import BytesIO
 
 from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
 import openpyxl
@@ -29,15 +31,47 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Note on async/sync integration: python-telegram-bot (v20+) is fully async,
-# but Flask (WSGI) here is synchronous. A background thread running its own
-# persistent event loop was tried first, but PythonAnywhere's free-tier WSGI
-# hosting does not schedule extra `threading.Thread`s reliably - the thread
-# stayed alive but never actually got CPU time to process work (confirmed via
-# diagnostic logging). So instead, each webhook request runs its own
-# self-contained `asyncio.run()` that does initialize -> process -> shutdown
-# in one go (see _handle_update_standalone near the /webhook route below) -
-# this is PTB's own recommended pattern for serverless/webhook deployments.
+# ==================== ASYNC RUNTIME ====================
+# python-telegram-bot (v20+) is fully async, Flask (WSGI) here is synchronous.
+#
+# Two approaches were tried and rejected before this one:
+#   1. A background thread running a forever-loop: PythonAnywhere's free tier
+#      never actually schedules such threads - confirmed via diagnostics, the
+#      thread reported alive and its loop 'running', but submitted coroutines
+#      never executed (always timed out).
+#   2. asyncio.run() per request: works, but it CLOSES the loop when done,
+#      which invalidates PTB's HTTP client, so initialize() had to run again
+#      on every single message - roughly 0.5-1s of overhead per message.
+#
+# What we do instead: keep ONE event loop object alive for the life of the
+# worker process and drive it with run_until_complete(), which (unlike
+# asyncio.run) leaves the loop open afterwards. The loop only actually runs
+# while we are inside run_until_complete, i.e. on the request thread - so no
+# background thread is needed, and initialize() is paid once per worker.
+
+_loop = asyncio.new_event_loop()
+_loop_lock = threading.Lock()  # WSGI may hand us concurrent requests per process
+_ptb_ready = False
+
+
+def run_sync(coro, timeout=25):
+    """Run one PTB coroutine on the long-lived loop, initializing on first use."""
+    global _ptb_ready
+    with _loop_lock:
+        if not _ptb_ready:
+            _loop.run_until_complete(telegram_app.initialize())
+            _ptb_ready = True
+            logger.info("✅ Telegram client initialized (persists for this worker)")
+        try:
+            return _loop.run_until_complete(asyncio.wait_for(coro, timeout))
+        except (NetworkError, TimedOut):
+            # The HTTP client may have gone stale (long idle, connection reset).
+            # Force a fresh initialize() on the NEXT request rather than retrying
+            # here - a retry could re-run handler side effects that already
+            # happened (e.g. sending a reply twice). Telegram re-delivers the
+            # update on its own after we return 500.
+            _ptb_ready = False
+            raise
 
 # States for conversations
 ADD_NAME, ADD_PHONE, ADD_SALARY_TYPE = range(3)
@@ -1172,28 +1206,13 @@ async def handle_report_format(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ==================== FLASK WEBHOOK ====================
 
-async def _handle_update_standalone(update):
-    """Fully self-contained: initialize -> process -> shutdown, all within
-    ONE event loop lifecycle (one asyncio.run() call). This is PTB's own
-    recommended pattern for webhook/serverless deployments where there is no
-    persistent event loop available (background threads don't get scheduled
-    reliably under PythonAnywhere's free-tier WSGI hosting - confirmed via
-    diagnostic logging: a background thread stayed 'alive' and its loop
-    reported 'running', but never actually got CPU time to process work)."""
-    await telegram_app.initialize()
-    try:
-        await telegram_app.process_update(update)
-    finally:
-        await telegram_app.shutdown()
-
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle webhook updates from Telegram."""
     try:
         data = request.get_json()
         update = Update.de_json(data, telegram_app.bot)
-        asyncio.run(_handle_update_standalone(update))
+        run_sync(telegram_app.process_update(update))
         return 'OK', 200
     except Exception as e:
         logger.error(f"Webhook error: {type(e).__name__}: {e}", exc_info=True)
@@ -1261,39 +1280,35 @@ def _get_all_employees():
 
 
 async def _send_reminders_job():
-    await telegram_app.initialize()
-    try:
-        bot = telegram_app.bot
-        now = utils.get_now()
-        employees = _get_all_employees()
-        sent = 0
+    bot = telegram_app.bot
+    now = utils.get_now()
+    employees = _get_all_employees()
+    sent = 0
 
-        if now.hour < 12:
-            today = now.date()
-            for emp in employees:
-                if db.get_daily_attendance_for_user(emp['id'], today) is not None:
-                    continue  # already checked in today
-                try:
-                    await bot.send_message(chat_id=emp['id'], text=MORNING_REMINDER_MSG)
-                    sent += 1
-                except Exception as e:
-                    logger.warning(f"Morning reminder failed for {emp['full_name']} ({emp['id']}): {e}")
-            kind = "morning"
-        else:
-            for emp in employees:
-                if not db.is_user_checked_in(emp['id']):
-                    continue  # not currently checked in, nothing to remind about
-                try:
-                    await bot.send_message(chat_id=emp['id'], text=EVENING_REMINDER_MSG)
-                    sent += 1
-                except Exception as e:
-                    logger.warning(f"Evening reminder failed for {emp['full_name']} ({emp['id']}): {e}")
-            kind = "evening"
+    if now.hour < 12:
+        today = now.date()
+        for emp in employees:
+            if db.get_daily_attendance_for_user(emp['id'], today) is not None:
+                continue  # already checked in today
+            try:
+                await bot.send_message(chat_id=emp['id'], text=MORNING_REMINDER_MSG)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"Morning reminder failed for {emp['full_name']} ({emp['id']}): {e}")
+        kind = "morning"
+    else:
+        for emp in employees:
+            if not db.is_user_checked_in(emp['id']):
+                continue  # not currently checked in, nothing to remind about
+            try:
+                await bot.send_message(chat_id=emp['id'], text=EVENING_REMINDER_MSG)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"Evening reminder failed for {emp['full_name']} ({emp['id']}): {e}")
+        kind = "evening"
 
-        logger.info(f"✅ {kind.capitalize()} reminders sent to {sent}/{len(employees)} employees")
-        return kind, sent, len(employees)
-    finally:
-        await telegram_app.shutdown()
+    logger.info(f"✅ {kind.capitalize()} reminders sent to {sent}/{len(employees)} employees")
+    return kind, sent, len(employees)
 
 
 @app.route('/cron/reminders/<secret>', methods=['GET', 'POST'])
@@ -1304,7 +1319,7 @@ def cron_reminders(secret):
     if secret != CRON_SECRET:
         return 'Forbidden', 403
     try:
-        kind, sent, total = asyncio.run(_send_reminders_job())
+        kind, sent, total = run_sync(_send_reminders_job(), timeout=60)
         return jsonify({'status': 'ok', 'kind': kind, 'sent': sent, 'total': total}), 200
     except Exception as e:
         logger.error(f"Cron reminders error: {type(e).__name__}: {e}", exc_info=True)
