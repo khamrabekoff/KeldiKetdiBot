@@ -223,6 +223,39 @@ def get_user(telegram_id):
         return None
 
 
+def create_backup(dest_path):
+    """Write a consistent snapshot of the live DB to dest_path.
+
+    Uses sqlite3's own backup API rather than copying the file: the DB runs in
+    WAL mode, where a plain file copy can miss commits still sitting in the
+    -wal sidecar, and can catch a half-written page if the bot writes mid-copy.
+    """
+    source = get_connection()
+    dest = sqlite3.connect(dest_path)
+    try:
+        with dest:
+            source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+    return dest_path
+
+
+def get_db_stats():
+    """Row counts, so a backup's caption can show what's actually inside it."""
+    counts = {}
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        for table in ('users', 'attendance', 'rates', 'correction_requests'):
+            c.execute(f"SELECT COUNT(*) AS n FROM {table}")  # fixed literals, not user input
+            counts[table] = c.fetchone()['n']
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error collecting db stats: {e}")
+    return counts
+
+
 def get_employees():
     """All employees, alphabetically."""
     try:

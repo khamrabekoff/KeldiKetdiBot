@@ -3,6 +3,7 @@ import asyncio
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from datetime import datetime, time, timedelta
 from io import BytesIO
@@ -801,6 +802,21 @@ async def preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise
 
 
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """On-demand database backup, sent to every admin as a Telegram file."""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Bu buyruq faqat administrator uchun.")
+        return
+    await update.message.reply_text("💾 Zaxira nusxa tayyorlanmoqda…")
+    try:
+        if not await _send_db_backup(telegram_app.bot):
+            await update.message.reply_text("❌ Zaxira nusxani yuborib bo'lmadi.")
+        audit.log_action(update.effective_user.id, 'backup_created', "Qo'lda zaxira nusxa")
+    except Exception as e:
+        logger.error(f"Manual backup failed: {type(e).__name__}: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Xatolik: {e}")
+
+
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /analytics - общая статистика по всем сотрудникам"""
     if not await check_admin(update.effective_user.id):
@@ -1463,8 +1479,62 @@ async def _send_reminders_job(kind=None, dry_run=False):
     digest_sent = False
     if kind == "morning" and now.weekday() == 0:
         digest_sent = await _send_weekly_digest(bot)
+        await _send_db_backup(bot)
 
     return kind, sent, len(employees), digest_sent
+
+
+async def _send_db_backup(bot):
+    """Mail the database to the admins as a Telegram document.
+
+    The free tier has no off-site backup and its outbound proxy blocks most
+    of the internet, but Telegram is reachable - so Telegram is where the
+    backup goes. It lands in the admin's own chat history, off this server.
+    """
+    stats = db.get_db_stats()
+    stamp = utils.get_now().strftime('%Y%m%d_%H%M')
+    tmp_path = os.path.join(tempfile.gettempdir(), f"keldi_ketdi_{stamp}.db")
+
+    try:
+        db.create_backup(tmp_path)
+        size_kb = os.path.getsize(tmp_path) / 1024
+        caption = (
+            f"💾 <b>Zaxira nusxa</b>\n"
+            f"<i>{ui.fmt_date(utils.get_now())} · {utils.get_now().strftime('%H:%M')}</i>\n\n"
+            f"<code>Xodimlar:     {stats.get('users', '?')}</code>\n"
+            f"<code>Ish kunlari:  {stats.get('attendance', '?')}</code>\n"
+            f"<code>So'rovlar:    {stats.get('correction_requests', '?')}</code>\n"
+            f"<code>Hajmi:        {size_kb:.0f} KB</code>\n\n"
+            f"<i>Bu faylni saqlab qo'ying — ma'lumotlar yo'qolsa, tiklash uchun kerak bo'ladi.</i>"
+        )
+
+        conn = db.get_connection()
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE role='admin'")
+        admins = c.fetchall()
+        conn.close()
+
+        ok = 0
+        for admin in admins:
+            try:
+                with open(tmp_path, 'rb') as fh:
+                    await bot.send_document(
+                        chat_id=admin['id'],
+                        document=fh,
+                        filename=f"keldi_ketdi_{stamp}.db",
+                        caption=caption,
+                        parse_mode='HTML',
+                    )
+                ok += 1
+            except Exception as e:
+                logger.warning(f"Backup send failed for admin {admin['id']}: {e}")
+        logger.info(f"💾 Backup sent to {ok}/{len(admins)} admins ({size_kb:.0f} KB)")
+        return ok > 0
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 async def _send_weekly_digest(bot):
@@ -1560,6 +1630,7 @@ def create_application():
 
         # Analytics commands (admin only)
         app_config.add_handler(CommandHandler("preview", cmd_preview))
+        app_config.add_handler(CommandHandler("backup", cmd_backup))
         app_config.add_handler(CommandHandler("analytics", cmd_analytics))
         app_config.add_handler(CommandHandler("employee_stats", cmd_employee_stats))
         app_config.add_handler(CommandHandler("export_excel", cmd_export_excel))
