@@ -1363,6 +1363,26 @@ async def handle_report_format(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ==================== FLASK WEBHOOK ====================
 
+def _maybe_send_evening_reminder():
+    """Fallback for the evening reminder.
+
+    The free tier allows only ONE scheduled task, which is used for the
+    morning one. So we also check, on ordinary bot traffic, whether the
+    evening reminder is due and hasn't gone out yet today. Best-effort by
+    nature (it needs *someone* to message the bot after work ends), which is
+    why the flag guard is shared with the scheduled path - whichever fires
+    first wins, and the other becomes a no-op."""
+    try:
+        now = utils.get_now()
+        end = settings.get_time('work_end')
+        past_end = (now.hour, now.minute) >= (end.hour, end.minute)
+        if not past_end or not _reminder_due('evening', now.date()):
+            return
+        run_sync(_send_reminders_job('evening'), timeout=60)
+    except Exception as e:
+        logger.warning(f"Evening reminder fallback skipped: {type(e).__name__}: {e}")
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle webhook updates from Telegram."""
@@ -1370,10 +1390,13 @@ def webhook():
         data = request.get_json()
         update = Update.de_json(data, telegram_app.bot)
         run_sync(telegram_app.process_update(update))
-        return 'OK', 200
     except Exception as e:
         logger.error(f"Webhook error: {type(e).__name__}: {e}", exc_info=True)
         return 'ERROR', 500
+
+    # After the user has had their reply, not before.
+    _maybe_send_evening_reminder()
+    return 'OK', 200
 
 
 @app.route('/health', methods=['GET'])
@@ -1476,48 +1499,119 @@ def _get_all_employees():
     return employees
 
 
-async def _send_reminders_job():
+def _reminder_flag_key(kind):
+    return f"reminder_{kind}_sent_on"
+
+
+def _reminder_due(kind, today):
+    """True if this reminder hasn't gone out yet today. Guards against a
+    double-send when both the scheduled task and the lazy fallback fire."""
+    return settings.get_flag(_reminder_flag_key(kind)) != today.isoformat()
+
+
+async def _send_reminders_job(kind=None):
+    """kind=None auto-selects by time of day, so a single scheduled task can
+    serve either slot depending on when it runs."""
     bot = telegram_app.bot
     now = utils.get_now()
+    today = now.date()
+    if kind is None:
+        kind = "morning" if now.hour < 12 else "evening"
+
     employees = _get_all_employees()
     sent = 0
 
-    if now.hour < 12:
-        today = now.date()
-        for emp in employees:
+    for emp in employees:
+        if kind == "morning":
+            # Skip anyone who already checked in - they don't need nagging.
             if db.get_daily_attendance_for_user(emp['id'], today) is not None:
-                continue  # already checked in today
-            try:
-                await bot.send_message(chat_id=emp['id'], text=MORNING_REMINDER_MSG)
-                sent += 1
-            except Exception as e:
-                logger.warning(f"Morning reminder failed for {emp['full_name']} ({emp['id']}): {e}")
-        kind = "morning"
-    else:
-        for emp in employees:
+                continue
+            text = MORNING_REMINDER_MSG
+        else:
+            # Only people still clocked in have something left to do.
             if not db.is_user_checked_in(emp['id']):
-                continue  # not currently checked in, nothing to remind about
-            try:
-                await bot.send_message(chat_id=emp['id'], text=EVENING_REMINDER_MSG)
-                sent += 1
-            except Exception as e:
-                logger.warning(f"Evening reminder failed for {emp['full_name']} ({emp['id']}): {e}")
-        kind = "evening"
+                continue
+            text = EVENING_REMINDER_MSG
+        try:
+            await bot.send_message(chat_id=emp['id'], text=text)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"{kind} reminder failed for {emp['full_name']} ({emp['id']}): {e}")
 
-    logger.info(f"✅ {kind.capitalize()} reminders sent to {sent}/{len(employees)} employees")
-    return kind, sent, len(employees)
+    settings.set_flag(_reminder_flag_key(kind), today.isoformat())
+    logger.info(f"✅ {kind} reminders sent to {sent}/{len(employees)} employees")
+
+    # Monday morning: fold the weekly digest into the same run, so it costs no
+    # extra scheduled task (the free tier only allows one).
+    digest_sent = False
+    if kind == "morning" and now.weekday() == 0:
+        digest_sent = await _send_weekly_digest(bot)
+
+    return kind, sent, len(employees), digest_sent
+
+
+async def _send_weekly_digest(bot):
+    """Last 7 days summarised for the admins."""
+    now = utils.get_now()
+    start = (now - timedelta(days=7)).date()
+    text = (
+        f"📅 <b>HAFTALIK HISOBOT</b>\n"
+        f"<i>{start.strftime('%d.%m')} — {now.strftime('%d.%m')}</i>\n"
+        f"{'━' * 18}\n\n"
+    )
+    rows = db.get_month_attendance_details(start)
+    if not rows:
+        text += "<i>Bu haftada ma'lumot yo'q.</i>"
+    else:
+        per_employee = {}
+        for r in rows:
+            b = per_employee.setdefault(r['full_name'], {'days': 0, 'wage': 0.0, 'mins': 0.0})
+            if r['check_in'] and r['check_out']:
+                b['days'] += 1
+                b['wage'] += r['total_wage'] or 0
+                b['mins'] += ui.worked_minutes(r['check_in'], r['check_out'])
+        grand = 0.0
+        for name, b in sorted(per_employee.items(), key=lambda kv: -kv[1]['wage']):
+            grand += b['wage']
+            text += (
+                f"👤 <b>{name}</b>\n"
+                f"<code>  {b['days']} kun · {ui.fmt_duration(b['mins'])} · {ui.fmt_money(b['wage'])}</code>\n\n"
+            )
+        text += f"{'━' * 18}\n💵 <b>JAMI: {ui.fmt_money(grand)}</b>"
+
+    conn = db.get_connection()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE role='admin'")
+    admins = c.fetchall()
+    conn.close()
+
+    ok = False
+    for admin in admins:
+        try:
+            await bot.send_message(chat_id=admin['id'], text=text, parse_mode='HTML')
+            ok = True
+        except Exception as e:
+            logger.warning(f"Weekly digest failed for admin {admin['id']}: {e}")
+    return ok
 
 
 @app.route('/cron/reminders/<secret>', methods=['GET', 'POST'])
 def cron_reminders(secret):
-    """Triggered by a PythonAnywhere scheduled Task (via curl/wget) at the
-    desired times. The secret in the URL path prevents random internet
-    traffic from spamming all employees with reminders."""
+    """Triggered by a scheduled task hitting this URL. The secret in the path
+    keeps random internet traffic from spamming everyone with reminders.
+    Optional ?kind=morning|evening pins which reminder to send; without it the
+    time of day decides, so one task can cover either slot."""
     if secret != CRON_SECRET:
         return 'Forbidden', 403
+    kind = request.args.get('kind')
+    if kind not in (None, 'morning', 'evening'):
+        return jsonify({'status': 'error', 'message': "kind must be morning or evening"}), 400
     try:
-        kind, sent, total = run_sync(_send_reminders_job(), timeout=60)
-        return jsonify({'status': 'ok', 'kind': kind, 'sent': sent, 'total': total}), 200
+        kind, sent, total, digest = run_sync(_send_reminders_job(kind), timeout=120)
+        return jsonify({
+            'status': 'ok', 'kind': kind, 'sent': sent,
+            'total': total, 'weekly_digest': digest,
+        }), 200
     except Exception as e:
         logger.error(f"Cron reminders error: {type(e).__name__}: {e}", exc_info=True)
         return 'ERROR', 500

@@ -65,6 +65,15 @@ def _get_raw(key):
         return None
 
 
+def get_flag(key):
+    """Read a free-form marker value (used for 'already sent today' guards)."""
+    return _get_raw(key)
+
+
+def set_flag(key, value):
+    db.update_setting(key, str(value))
+
+
 def all_times():
     """[(key, label, current_value, description), ...] for rendering."""
     return [
