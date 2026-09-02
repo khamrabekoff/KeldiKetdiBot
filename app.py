@@ -22,6 +22,7 @@ import analytics
 import audit
 import excel_export
 import pdf_export
+import settings
 import ui
 from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_DOMAIN, ADMIN_SECRET, FLASK_PORT, CRON_SECRET, DEPLOY_SECRET, BOT_VERSION
 
@@ -93,6 +94,7 @@ EDIT_RATE_N, EDIT_RATE_M, EDIT_RATE_K, EDIT_RATE_OVERTIME = range(11, 15)
 EDIT_MONTHLY_SALARY, EDIT_OVERTIME_HOURLY, EDIT_RATE_PER_MINUTE = range(15, 18)
 ACTION_MENU, EDIT_ATT_DATE, EDIT_ATT_IN, EDIT_ATT_OUT = range(18, 22)
 COR_REQ_DATE, COR_REQ_IN, COR_REQ_OUT, COR_REQ_CONFIRM = range(22, 26)
+SET_TIME_VALUE = 26
 
 telegram_app = None
 
@@ -190,10 +192,10 @@ async def check_in_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = db.check_in_user(user_id, now)
 
     if result['success']:
-        cutoff = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        start_of_work = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if start_of_work <= now < now.replace(hour=11, minute=0) and now > cutoff:
-            note = "⚠️ <i>Kechikdingiz.</i>"
+        late_after = settings.get_time('late_after')
+        cutoff = now.replace(hour=late_after.hour, minute=late_after.minute, second=0, microsecond=0)
+        if now > cutoff:
+            note = f"⚠️ <i>Kechikdingiz ({settings.get_time_str('late_after')} dan keyin).</i>"
         else:
             note = "<i>Hayrli ish!</i>"
     else:
@@ -662,6 +664,71 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== ANALYTICS COMMANDS (ADMIN ONLY) ====================
+
+# ==================== SETTINGS ====================
+
+async def admin_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update.effective_user.id):
+        return
+    text, keyboard = ui.settings_card()
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def settings_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped a setting - ask for the new value."""
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    key = query.data.split(':', 1)[1]
+    if key not in settings.TIME_SETTINGS:
+        return ConversationHandler.END
+
+    context.user_data['setting_key'] = key
+    _, label, desc = settings.TIME_SETTINGS[key]
+    await query.message.reply_text(
+        f"{label}\n<i>{desc}</i>\n\n"
+        f"Hozirgi qiymat: <b>{settings.get_time_str(key)}</b>\n\n"
+        f"Yangi vaqtni <b>SS:DD</b> ko'rinishida yuboring (masalan <code>09:30</code>).\n"
+        f"Bekor qilish uchun /cancel",
+        parse_mode='HTML',
+    )
+    return SET_TIME_VALUE
+
+
+async def settings_set_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = context.user_data.get('setting_key')
+    if not key:
+        return ConversationHandler.END
+
+    if not settings.set_time(key, update.message.text):
+        await update.message.reply_text(
+            "❌ Noto'g'ri format. Masalan: <code>09:30</code>\nQayta urinib ko'ring yoki /cancel",
+            parse_mode='HTML',
+        )
+        return SET_TIME_VALUE
+
+    _, label, _ = settings.TIME_SETTINGS[key]
+    new_value = settings.get_time_str(key)
+    audit.log_action(update.effective_user.id, 'settings_changed', f"{label} -> {new_value}")
+    context.user_data.pop('setting_key', None)
+
+    await update.message.reply_text(
+        f"✅ <b>{label}</b> yangilandi: <b>{new_value}</b>",
+        reply_markup=ui.admin_keyboard(),
+        parse_mode='HTML',
+    )
+    text, keyboard = ui.settings_card()
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+    return ConversationHandler.END
+
+
+async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('setting_key', None)
+    await update.message.reply_text("Bekor qilindi.", reply_markup=ui.admin_keyboard())
+    return ConversationHandler.END
+
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: render an employee's own card as they currently see it.
@@ -1132,6 +1199,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_employees_handler(update, context)
         elif is_admin and text in (ui.BTN_ADMIN_CORRECTIONS, msg.BTN_ADMIN_CORRECTIONS):
             await admin_correction_list_handler(update, context)
+        elif is_admin and text == ui.BTN_ADMIN_SETTINGS:
+            await admin_settings_handler(update, context)
         elif is_admin and text in ("Telegram", "Excel"):
             await handle_report_format(update, context)
         # New employee keyboard. The old labels are still accepted below so
@@ -1463,6 +1532,19 @@ def create_application():
             persistent=False
         )
         app_config.add_handler(correction_conv)
+
+        # Settings Conversation (edit a work-hour value)
+        settings_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(settings_pick_callback, pattern="^set:")],
+            states={
+                SET_TIME_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_set_value)],
+            },
+            fallbacks=[CommandHandler("cancel", settings_cancel)],
+            name="settings_conv",
+            persistent=False,
+            allow_reentry=True,
+        )
+        app_config.add_handler(settings_conv)
 
         # Manage Employee Conversation (edit rates / attendance / delete)
         manage_emp_handler = ConversationHandler(

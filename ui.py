@@ -181,6 +181,7 @@ BTN_ADMIN_TODAY = "🏠 Bugun"
 BTN_ADMIN_REPORT = "📊 Hisobot"
 BTN_ADMIN_EMPLOYEES = "👥 Xodimlar"
 BTN_ADMIN_CORRECTIONS = "🔔 Tuzatishlar"
+BTN_ADMIN_SETTINGS = "⚙️ Sozlamalar"
 
 
 def admin_keyboard():
@@ -188,10 +189,28 @@ def admin_keyboard():
         [
             [BTN_ADMIN_TODAY, BTN_ADMIN_REPORT],
             [BTN_ADMIN_EMPLOYEES, BTN_ADMIN_CORRECTIONS],
+            [BTN_ADMIN_SETTINGS],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
+
+
+def settings_card():
+    """Current work-hour settings + a button per editable value."""
+    import settings as st
+
+    text = (
+        f"⚙️ <b>SOZLAMALAR</b>\n"
+        f"{'━' * 18}\n\n"
+        f"<i>O'zgartirish uchun pastdagi tugmani bosing.</i>\n\n"
+    )
+    keyboard = []
+    for key, label, value, desc in st.all_times():
+        text += f"{label}: <b>{value}</b>\n<i>  {desc}</i>\n\n"
+        keyboard.append([InlineKeyboardButton(f"{label} — {value}", callback_data=f"set:{key}")])
+
+    return text, InlineKeyboardMarkup(keyboard)
 
 
 def admin_dashboard_card():
