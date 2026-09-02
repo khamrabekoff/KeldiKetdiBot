@@ -817,6 +817,24 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Xatolik: {e}")
 
 
+async def cmd_sendall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a message to every employee: /sendall <matn>"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Bu buyruq faqat administrator uchun.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Foydalanish: <code>/sendall xabar matni</code>", parse_mode='HTML'
+        )
+        return
+    text = update.message.text.split(' ', 1)[1]
+    delivered, total = await _broadcast_to_employees(telegram_app.bot, text)
+    audit.log_broadcast(update.effective_user.id, delivered, text)
+    await update.message.reply_text(
+        f"✅ Xabar {delivered}/{total} xodimga yuborildi."
+    )
+
+
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /analytics - общая статистика по всем сотрудникам"""
     if not await check_admin(update.effective_user.id):
@@ -1537,6 +1555,20 @@ async def _send_db_backup(bot):
             pass
 
 
+async def _broadcast_to_employees(bot, text):
+    """Send one message to every employee. Returns (delivered, total)."""
+    employees = db.get_employees()
+    delivered = 0
+    for emp in employees:
+        try:
+            await bot.send_message(chat_id=emp['id'], text=text, parse_mode='HTML')
+            delivered += 1
+        except Exception as e:
+            logger.warning(f"Broadcast failed for {emp['full_name']} ({emp['id']}): {e}")
+    logger.info(f"Broadcast delivered to {delivered}/{len(employees)} employees")
+    return delivered, len(employees)
+
+
 async def _send_weekly_digest(bot):
     """Last 7 days summarised for the admins."""
     now = utils.get_now()
@@ -1580,6 +1612,24 @@ async def _send_weekly_digest(bot):
         except Exception as e:
             logger.warning(f"Weekly digest failed for admin {admin['id']}: {e}")
     return ok
+
+
+@app.route('/admin/broadcast/<secret>', methods=['POST'])
+def admin_broadcast(secret):
+    """Send a message to all employees. Same trust model as the other
+    secret-gated endpoints; body is JSON {"text": "..."}."""
+    if secret != DEPLOY_SECRET:
+        return 'Forbidden', 403
+    payload = request.get_json(silent=True) or {}
+    text = (payload.get('text') or '').strip()
+    if not text:
+        return jsonify({'status': 'error', 'message': 'text is required'}), 400
+    try:
+        delivered, total = run_sync(_broadcast_to_employees(telegram_app.bot, text), timeout=120)
+        return jsonify({'status': 'ok', 'delivered': delivered, 'total': total}), 200
+    except Exception as e:
+        logger.error(f"Broadcast error: {type(e).__name__}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/cron/reminders/<secret>', methods=['GET', 'POST'])
@@ -1631,6 +1681,7 @@ def create_application():
         # Analytics commands (admin only)
         app_config.add_handler(CommandHandler("preview", cmd_preview))
         app_config.add_handler(CommandHandler("backup", cmd_backup))
+        app_config.add_handler(CommandHandler("sendall", cmd_sendall))
         app_config.add_handler(CommandHandler("analytics", cmd_analytics))
         app_config.add_handler(CommandHandler("employee_stats", cmd_employee_stats))
         app_config.add_handler(CommandHandler("export_excel", cmd_export_excel))
