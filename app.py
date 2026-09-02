@@ -663,6 +663,49 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ANALYTICS COMMANDS (ADMIN ONLY) ====================
 
+async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: render an employee's own card as they currently see it.
+    Doubles as a live per-employee status check."""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Bu buyruq faqat administrator uchun.")
+        return
+    employees = _get_all_employees()
+    if not employees:
+        await update.message.reply_text("Xodimlar yo'q.")
+        return
+    keyboard = [
+        [InlineKeyboardButton(e['full_name'], callback_data=f"prev:{e['id']}")]
+        for e in employees
+    ]
+    await update.message.reply_text(
+        "👁 <b>Xodim ekranini ko'rish</b>\n<i>Xodim o'z telefonida nimani ko'rayotganini tanlang:</i>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML',
+    )
+
+
+async def preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return
+    emp_id = int(query.data.split(":")[1])
+    emp = db.get_user(emp_id)
+    if not emp:
+        await query.edit_message_text("❌ Xodim topilmadi.")
+        return
+    card = ui.employee_status_card(emp_id, emp['full_name'])
+    rates = db.get_db_rates(emp_id)
+    try:
+        await query.edit_message_text(
+            f"👁 <i>Xodim ekrani:</i>\n\n{card}\n\n💵 <i>Stavka: {ui.fmt_rate(rates)}</i>",
+            parse_mode='HTML',
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /analytics - общая статистика по всем сотрудникам"""
     if not await check_admin(update.effective_user.id):
@@ -1372,6 +1415,7 @@ def create_application():
         app_config.add_handler(CommandHandler("month", cmd_month))
 
         # Analytics commands (admin only)
+        app_config.add_handler(CommandHandler("preview", cmd_preview))
         app_config.add_handler(CommandHandler("analytics", cmd_analytics))
         app_config.add_handler(CommandHandler("employee_stats", cmd_employee_stats))
         app_config.add_handler(CommandHandler("export_excel", cmd_export_excel))
@@ -1449,6 +1493,7 @@ def create_application():
         app_config.add_handler(manage_emp_handler)
 
         # Callback handlers
+        app_config.add_handler(CallbackQueryHandler(preview_callback, pattern="^prev:"))
         app_config.add_handler(CallbackQueryHandler(admin_report_callback, pattern="^adm_report_"))
         app_config.add_handler(CallbackQueryHandler(approve_request_callback, pattern="^approve_req_"))
         app_config.add_handler(CallbackQueryHandler(reject_request_callback, pattern="^reject_req_"))
