@@ -79,17 +79,47 @@ def _initialize_bot(retries=3):
                 _loop.run_until_complete(telegram_app.shutdown())
             except Exception:
                 pass  # nothing to tear down on the very first run
+            if attempt > 1:
+                # The previous object failed to come up; reviving it tends to
+                # keep whatever inconsistent state broke it. Build a fresh one.
+                create_application()
             _loop.run_until_complete(telegram_app.initialize())
+            # initialize() can report success while the proxy failure left
+            # ExtBot half-built. Touch the property that would otherwise blow
+            # up later, deep inside PTB's update dispatch where we can neither
+            # see it nor retry - here we can do both.
+            telegram_app.bot.username
             _ptb_ready = True
             _stats['inits'] += 1
             logger.info("✅ Telegram client initialized (persists for this worker)")
             return
-        except (NetworkError, TimedOut) as e:
+        except (NetworkError, TimedOut, RuntimeError) as e:
             last_err = e
-            logger.warning(f"initialize() attempt {attempt}/{retries} failed: {e}")
+            logger.warning(f"initialize() attempt {attempt}/{retries} failed: {type(e).__name__}: {e}")
             if attempt < retries:
                 _loop.run_until_complete(asyncio.sleep(0.6 * attempt))
     raise last_err
+
+
+async def on_handler_error(update, context):
+    """Catch what PTB would otherwise only log.
+
+    Application.process_update swallows exceptions raised while dispatching -
+    including the 'ExtBot is not properly initialized' RuntimeError that means
+    our client is dead. Nothing then propagates to run_sync, so the ready flag
+    stays true and the worker silently drops every message from then on, with
+    /status still cheerfully reporting zero errors.
+
+    Registering any handler at all is what makes that failure visible; noticing
+    this particular one is what makes the self-repair described in DEPLOY.md
+    actually happen."""
+    global _ptb_ready
+    err = context.error
+    _stats['errors'] += 1
+    logger.error(f"Handler error: {type(err).__name__}: {err}", exc_info=err)
+    if isinstance(err, RuntimeError) and "not properly initialized" in str(err):
+        _ptb_ready = False
+        logger.warning("Telegram client is half-built - rebuilding on next update")
 
 
 def run_sync(coro, timeout=25):
@@ -1813,6 +1843,8 @@ def create_application():
 
         # Text handler (must be last)
         app_config.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text))
+
+        app_config.add_error_handler(on_handler_error)
 
         telegram_app = app_config
         logger.info("✅ Telegram app created successfully")
