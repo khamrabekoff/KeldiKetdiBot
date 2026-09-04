@@ -1306,24 +1306,38 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== FLASK WEBHOOK ====================
 
-def _maybe_send_evening_reminder():
-    """Fallback for the evening reminder.
+MORNING_LEAD = timedelta(minutes=30)
+MORNING_WINDOW = timedelta(hours=2)
 
-    The free tier allows only ONE scheduled task, which is used for the
-    morning one. So we also check, on ordinary bot traffic, whether the
-    evening reminder is due and hasn't gone out yet today. Best-effort by
-    nature (it needs *someone* to message the bot after work ends), which is
-    why the flag guard is shared with the scheduled path - whichever fires
-    first wins, and the other becomes a no-op."""
+
+def _maybe_send_due_reminders():
+    """Send whichever daily reminder is due, riding on ordinary bot traffic.
+
+    A scheduled task is the reliable trigger, but PythonAnywhere no longer
+    gives free accounts one at all, so newer deployments have nothing else.
+    Both reminders therefore fall back to this check. Where a scheduled task
+    does exist it simply gets there first - the flag guard makes whichever
+    runs second a no-op.
+
+    Best-effort by nature: it needs *someone* to message the bot after the
+    reminder falls due. The morning one is confined to a window around the
+    start of the day, so a first message at lunchtime doesn't produce a stale
+    "you haven't checked in" nudge."""
     try:
         now = utils.get_now()
-        end = settings.get_time('work_end')
-        past_end = (now.hour, now.minute) >= (end.hour, end.minute)
-        if not past_end or not _reminder_due('evening', now.date()):
+        today = now.date()
+
+        if now >= datetime.combine(today, settings.get_time('work_end')):
+            if _reminder_due('evening', today):
+                run_sync(_send_reminders_job('evening'), timeout=60)
             return
-        run_sync(_send_reminders_job('evening'), timeout=60)
+
+        start = datetime.combine(today, settings.get_time('work_start'))
+        if start - MORNING_LEAD <= now <= start + MORNING_WINDOW:
+            if _reminder_due('morning', today):
+                run_sync(_send_reminders_job('morning'), timeout=60)
     except Exception as e:
-        logger.warning(f"Evening reminder fallback skipped: {type(e).__name__}: {e}")
+        logger.warning(f"Reminder fallback skipped: {type(e).__name__}: {e}")
 
 
 @app.route('/webhook', methods=['POST'])
@@ -1338,7 +1352,7 @@ def webhook():
         return 'ERROR', 500
 
     # After the user has had their reply, not before.
-    _maybe_send_evening_reminder()
+    _maybe_send_due_reminders()
     return 'OK', 200
 
 

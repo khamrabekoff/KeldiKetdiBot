@@ -45,9 +45,12 @@ PythonAnywhere → **Consoles** → **Bash**:
 ```bash
 git clone https://github.com/khamrabekoff/KeldiKetdiBot.git bot_v2
 cd bot_v2
-mkvirtualenv --python=/usr/bin/python3.10 bot_v2_env
+mkvirtualenv --python=/usr/bin/python3.9 bot_v2_env
 pip install -r requirements.txt
 ```
+
+Python 3.9 — та же версия, что на первом клиенте. Новее тоже работает
+(проверено на 3.9 с python-telegram-bot 22.5), но зачем менять то, что едет.
 
 ## 5. Файл .env
 
@@ -68,7 +71,7 @@ FLASK_PORT=5000
 
 ## 6. Веб-приложение
 
-**Web** → **Add a new web app** → **Manual configuration** → **Python 3.10**.
+**Web** → **Add a new web app** → **Manual configuration** → **Python 3.9**.
 
 Заполнить поля:
 
@@ -78,19 +81,32 @@ FLASK_PORT=5000
 | Working directory | `/home/<user>/bot_v2` |
 | Virtualenv | `/home/<user>/.virtualenvs/bot_v2_env` |
 
-Открыть **WSGI configuration file**, стереть всё содержимое и вписать:
+WSGI-файл писать **из консоли, а не через редактор** — редактор
+автоматически расставляет отступы и ломает Python:
 
-```python
+```bash
+cat > /var/www/<user>_pythonanywhere_com_wsgi.py <<'WSGIEOF'
 import sys
+
 path = '/home/<user>/bot_v2'
 if path not in sys.path:
     sys.path.insert(0, path)
+
 from wsgi import app as application
+WSGIEOF
 ```
 
-Нажать зелёную **Reload**.
+Проверить, что всё импортируется, до запуска:
 
-Проверить: `https://<user>.pythonanywhere.com/health` должен ответить.
+```bash
+python -c "import config,database,analytics,audit,excel_export,pdf_export,ui,settings,utils,messages; print('MODULES OK', config.BOT_VERSION)"
+python -c "import app; print('APP IMPORT OK')"
+```
+
+Предупреждения `PTBUserWarning` про `per_message` — нормальны, не ошибка.
+
+Затем **Web** → зелёная **Reload**. Проверить:
+`https://<user>.pythonanywhere.com/health` должен ответить.
 
 ## 7. Привязать webhook
 
@@ -101,21 +117,30 @@ from wsgi import app as application
 curl "https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=https://<user>.pythonanywhere.com/webhook"
 ```
 
-Ответ должен быть `{"ok":true,...}`.
-
-## 8. Утренние напоминания
-
-**Tasks** → создать ежедневную задачу. Время указывается **в UTC**,
-Ташкент = UTC+5, значит для 08:30 по Ташкенту ставим **03:30**:
+Ответ должен быть `{"ok":true,...}`. Проверить привязку:
 
 ```bash
-curl -s "https://<user>.pythonanywhere.com/cron/reminders/<CRON_SECRET>?kind=morning"
+curl "https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo"
 ```
 
-Вечернее напоминание и недельная сводка отдельной задачи не требуют —
-они прицеплены к этому же запуску и к обычному трафику.
+## 8. Напоминания
 
-Проверить без спама живым людям:
+**Отдельно настраивать нечего.** Бесплатным аккаунтам PythonAnywhere больше
+не даёт задач по расписанию, поэтому оба напоминания срабатывают на обычном
+трафике бота: утреннее — в окне вокруг начала рабочего дня, вечернее — после
+его конца. Недельная сводка и резервная копия идут вместе с утренним.
+
+Ограничение: напоминание уходит, когда боту напишет первый человек, а не
+ровно по часам. Если утром никто не написал — в этот день не уйдёт.
+
+Нужна гарантия по расписанию — платный тариф ($5/мес, появится вкладка
+Tasks) или внешний планировщик, дёргающий раз в день:
+
+```
+https://<user>.pythonanywhere.com/cron/reminders/<CRON_SECRET>?kind=morning
+```
+
+Проверить, кому бы ушло, ничего не отправляя:
 
 ```bash
 curl -s "https://<user>.pythonanywhere.com/cron/reminders/<CRON_SECRET>?kind=evening&dry=1"
@@ -163,10 +188,6 @@ python -m py_compile app.py ui.py database.py settings.py analytics.py
 
 ## Что нужно продлевать вручную
 
-Бесплатный тариф периодически «протухает». Раз в месяц зайти и нажать:
-
-- **Web** → Run until N months from today
-- **Tasks** → Extend expiry
-
-Иначе бот и напоминания просто перестают работать. Это касается
-**каждого** клиентского аккаунта отдельно.
+Бесплатный тариф периодически «протухает». Раз в месяц зайти в каждый
+клиентский аккаунт и нажать **Web** → **Run until 1 month from today**.
+Иначе сайт отключат и бот замолчит.
