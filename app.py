@@ -309,8 +309,8 @@ async def employee_month_handler(update: Update, context: ContextTypes.DEFAULT_T
         ci = row['check_in'].strftime('%H:%M') if row['check_in'] else "--:--"
         co = row['check_out'].strftime('%H:%M') if row['check_out'] else "--:--"
         w = row['total_wage']
-        report += f"🔹 {d}: {ci} - {co} | {w} $\n"
-    report += f"\n💰 Jami: {total} $"
+        report += f"🔹 {d}: {ci} - {co} | {ui.fmt_money(w, unit=False)}\n"
+    report += f"\n💰 Jami: {ui.fmt_money(total)}"
     user = db.get_user(user_id)
     menu_markup = await get_main_menu_markup(user['role'], user_id)
     await update.message.reply_text(report, reply_markup=menu_markup)
@@ -651,7 +651,7 @@ async def edit_att_out_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         wage, _, breakdown = utils.calculate_wage(in_time, out_time, rates)
         db.update_attendance_manual(user_id, target_date, in_time, out_time, wage, breakdown)
         audit.log_attendance_updated(update.effective_user.id, user_id, date_str, in_val, out_val)
-        await update.message.reply_text(msg.MSG_EDIT_ATT_CONFIRM.format(date=date_str, ci=in_val, co=out_val, wage=f"{wage:.2f}"))
+        await update.message.reply_text(msg.MSG_EDIT_ATT_CONFIRM.format(date=date_str, ci=in_val, co=out_val, wage=ui.fmt_money(wage)))
         user = db.get_user(update.effective_user.id)
         await show_main_menu(update, user)
         return ConversationHandler.END
@@ -807,14 +807,14 @@ async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _overtime_rate_prompt(monthly_salary):
     """Ask for an overtime rate, showing what the salary already works out to.
 
-    A bare "$/minute" question is unanswerable without knowing the figure it
-    defaults to, so the prompt spells out the division.
+    A bare "so'm per minute" question is unanswerable without knowing the
+    figure it defaults to, so the prompt spells out the division.
     """
     context = workdays.month_context(utils.get_now().date())
     auto = workdays.base_rate_per_minute(monthly_salary, context)
     text = msg.MSG_INPUT_OVERTIME_RATE.format(
-        auto=f"${auto:.4f}/daq",
-        salary=f"${monthly_salary:,.0f}",
+        auto=f"{auto:,.4f}".replace(',', ' ') + " so'm/daq",
+        salary=ui.fmt_money(monthly_salary),
         working_days=context['working_days'],
         minutes=context['standard_minutes'],
     )
@@ -1233,7 +1233,7 @@ async def add_emp_rate_overtime(update: Update, context: ContextTypes.DEFAULT_TY
             rate_k=data['rate_k'], rate_overtime=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        rate_info = f"N:{data['rate_n']}$ | M:{data['rate_m']}$ | K:{data['rate_k']}$ | OT:{val}$"
+        rate_info = f"N:{data['rate_n']} | M:{data['rate_m']} | K:{data['rate_k']} | OT:{val}  (so'm/soat)"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Tarif', rate_info=rate_info
@@ -1276,8 +1276,8 @@ async def add_emp_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TY
             overtime_per_minute=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        overtime_label = f"{val}$/daq" if val else "avtomatik"
-        rate_info = f"Oylik: {data['monthly_salary']:,.0f}$ | Qo'shimcha: {overtime_label}"
+        overtime_label = f"{val:g} so'm/daq" if val else "avtomatik"
+        rate_info = f"Oylik: {ui.fmt_money(data['monthly_salary'])} | Qo'shimcha: {overtime_label}"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Oylik maosh', rate_info=rate_info
@@ -1303,7 +1303,7 @@ async def add_emp_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_
             rate_per_minute=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        rate_info = f"Har daqiqa: {val}$/daq"
+        rate_info = f"Har daqiqa: {val:g} so'm/daq"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Minutlik stavka', rate_info=rate_info
@@ -1679,32 +1679,43 @@ async def _send_reminders_job(kind=None, dry_run=False):
     employees = _get_all_employees()
     recipients = []
 
-    for emp in employees:
-        if kind == "morning":
-            # Skip anyone who already checked in - they don't need nagging.
-            if db.get_daily_attendance_for_user(emp['id'], today) is not None:
-                continue
-            text = MORNING_REMINDER_MSG
-        else:
-            # Only people still clocked in have something left to do.
-            if not db.is_user_checked_in(emp['id']):
-                continue
-            text = EVENING_REMINDER_MSG
+    # Nobody is expected at work on a Sunday or an official holiday, so
+    # "you haven't checked in" is pure noise. Gated here rather than at the
+    # callers because the cron endpoint reaches this job directly. The Monday
+    # digest and backup below still run - they are for the admin, not the
+    # employees, and a holiday Monday shouldn't cost a week's backup.
+    rest_day = workdays.is_rest_day(today)
 
-        recipients.append(emp['full_name'])
-        if dry_run:
-            continue
-        try:
-            await bot.send_message(chat_id=emp['id'], text=text)
-        except Exception as e:
-            logger.warning(f"{kind} reminder failed for {emp['full_name']} ({emp['id']}): {e}")
+    if not rest_day:
+        for emp in employees:
+            if kind == "morning":
+                # Skip anyone who already checked in - they don't need nagging.
+                if db.get_daily_attendance_for_user(emp['id'], today) is not None:
+                    continue
+                text = MORNING_REMINDER_MSG
+            else:
+                # Only people still clocked in have something left to do.
+                if not db.is_user_checked_in(emp['id']):
+                    continue
+                text = EVENING_REMINDER_MSG
+
+            recipients.append(emp['full_name'])
+            if dry_run:
+                continue
+            try:
+                await bot.send_message(chat_id=emp['id'], text=text)
+            except Exception as e:
+                logger.warning(f"{kind} reminder failed for {emp['full_name']} ({emp['id']}): {e}")
 
     if dry_run:
         return kind, recipients, len(employees), False
 
     sent = len(recipients)
     settings.set_flag(_reminder_flag_key(kind), today.isoformat())
-    logger.info(f"✅ {kind} reminders sent to {sent}/{len(employees)} employees")
+    if rest_day:
+        logger.info(f"⏭ {kind} reminders skipped: {today} is a rest day")
+    else:
+        logger.info(f"✅ {kind} reminders sent to {sent}/{len(employees)} employees")
 
     # Monday morning: fold the weekly digest into the same run, so it costs no
     # extra scheduled task (the free tier only allows one).
@@ -1820,7 +1831,7 @@ async def _send_weekly_digest(bot):
             grand += b['wage']
             text += (
                 f"👤 <b>{name}</b>\n"
-                f"<code>  {b['days']} kun · {ui.fmt_duration(b['mins'])} · {ui.fmt_money(b['wage'])}</code>\n\n"
+                f"<code>  {b['days']} kun · {ui.fmt_duration(b['mins'])} · {ui.fmt_money(b['wage'], unit=False)}</code>\n\n"
             )
         text += f"{'━' * 18}\n💵 <b>JAMI: {ui.fmt_money(grand)}</b>"
 

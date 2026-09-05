@@ -35,7 +35,7 @@ def _calculate_wage_per_minute(check_in, check_out, rates):
         total_minutes = (check_out - check_in).total_seconds() / 60.0
         rate_per_minute = rates.get('rate_per_minute', 0)
         wage = round(total_minutes * rate_per_minute, 2)
-        details = f"⏱ {total_minutes:.0f} мин × {rate_per_minute}$/мин"
+        details = f"⏱ {total_minutes:.0f} daq × {rate_per_minute:g} so'm"
         return wage, details, {'minutes': total_minutes}
     except Exception as e:
         return 0, f"Ошибка расчета: {e}", {}
@@ -139,7 +139,7 @@ def _calculate_wage_tariff(check_in, check_out, rates):
             breakdown['ot'] = ot_wage
 
         total_wage = round(total_wage, 2)
-        details = f"N:{breakdown['n']:.1f}$ M:{breakdown['m']:.1f}$ K:{breakdown['k']:.1f}$ OT:{breakdown['ot']:.1f}$"
+        details = f"N:{breakdown['n']:.0f} M:{breakdown['m']:.0f} K:{breakdown['k']:.0f} OT:{breakdown['ot']:.0f}"
         return total_wage, details, breakdown
     except Exception as e:
         return 0, f"Ошибка расчета: {e}", {}
@@ -155,11 +155,6 @@ def split_wage(total_wage, breakdown):
     """
     overtime = round(breakdown.get('ot', 0) or 0, 2)
     return round((total_wage or 0) - overtime, 2), overtime
-
-
-def format_currency(amount):
-    """Format amount as currency"""
-    return f"{amount:.2f} $"
 
 
 def validate_phone(phone):

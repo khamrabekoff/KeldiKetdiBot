@@ -21,6 +21,9 @@ BORDER = Border(
     bottom=Side(style='thin')
 )
 
+# Wages are in so'm, which has no subunit worth showing at these figures.
+MONEY_FORMAT = '#,##0" so\'m"'
+
 
 def create_monthly_report_excel(start_date, filename=None):
     """Create beautiful monthly report with charts"""
@@ -43,7 +46,7 @@ def create_monthly_report_excel(start_date, filename=None):
         ws.row_dimensions[1].height = 25
 
         # Headers
-        headers = ["Ism", "Sana", "Kelish", "Ketish", "Turi", "Tafsilot", "Jami ($)"]
+        headers = ["Ism", "Sana", "Kelish", "Ketish", "Turi", "Tafsilot", "Jami (so'm)"]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=3, column=col)
             cell.value = header
@@ -81,9 +84,9 @@ def create_monthly_report_excel(start_date, filename=None):
                 total = row['total_wage']
                 if stype == 'per_minute':
                     total_mins = (check_out - check_in).total_seconds() / 60.0
-                    tafsilot = f"{total_mins:.0f}min × ${rates['rate_per_minute']}"
+                    tafsilot = f"{total_mins:.0f}min × {rates['rate_per_minute']:g}"
                 elif stype == 'monthly':
-                    tafsilot = f"Base: ${breakdown.get('regular', 0):.2f}, OT: ${breakdown.get('ot', 0):.2f}"
+                    tafsilot = f"Base: {breakdown.get('regular', 0):,.0f}, OT: {breakdown.get('ot', 0):,.0f}"
                 else:
                     tafsilot = f"N:{breakdown['n']:.0f} M:{breakdown['m']:.0f} K:{breakdown['k']:.0f} OT:{breakdown['ot']:.0f}"
             else:
@@ -110,7 +113,7 @@ def create_monthly_report_excel(start_date, filename=None):
                 cell = ws.cell(row=row_num, column=col)
                 cell.border = BORDER
                 if col == 7:
-                    cell.number_format = '$#,##0.00'
+                    cell.number_format = MONEY_FORMAT
                     cell.alignment = Alignment(horizontal="right")
 
             row_num += 1
@@ -129,13 +132,13 @@ def create_monthly_report_excel(start_date, filename=None):
         for emp_name, wage in sorted(employee_totals.items(), key=lambda x: x[1], reverse=True):
             ws.cell(row=row_num, column=1).value = emp_name
             ws.cell(row=row_num, column=7).value = wage
-            ws.cell(row=row_num, column=7).number_format = '$#,##0.00'
+            ws.cell(row=row_num, column=7).number_format = MONEY_FORMAT
             ws.cell(row=row_num, column=7).font = TOTAL_FONT
             row_num += 1
 
         ws.cell(row=row_num, column=1).value = "JAMI:"
         ws.cell(row=row_num, column=7).value = total_wage
-        ws.cell(row=row_num, column=7).number_format = '$#,##0.00'
+        ws.cell(row=row_num, column=7).number_format = MONEY_FORMAT
         ws.cell(row=row_num, column=7).font = TOTAL_FONT
         ws.cell(row=row_num, column=7).fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
 
@@ -154,7 +157,7 @@ def create_monthly_report_excel(start_date, filename=None):
 
             # Prepare data for chart
             chart_sheet['A1'].value = "Ism"
-            chart_sheet['B1'].value = "Jami ($)"
+            chart_sheet['B1'].value = "Jami (so'm)"
 
             row_num = 2
             for emp_name, wage in sorted(employee_totals.items(), key=lambda x: x[1], reverse=True):
@@ -167,7 +170,7 @@ def create_monthly_report_excel(start_date, filename=None):
             chart.type = "col"
             chart.style = 10
             chart.title = "Oylik to'lovlar"
-            chart.y_axis.title = 'To\'lov ($)'
+            chart.y_axis.title = 'To\'lov (so\'m)'
             chart.x_axis.title = 'Xodimlar'
 
             data = Reference(chart_sheet, min_col=2, min_row=1, max_row=row_num-1)
@@ -247,17 +250,17 @@ def create_employee_detailed_excel(user_id, days=30, filename=None):
         row += 1
         ws[f'A{row}'].value = "Jami to'lov:"
         ws[f'B{row}'].value = stats['total_wage']
-        ws[f'B{row}'].number_format = '$#,##0.00'
+        ws[f'B{row}'].number_format = MONEY_FORMAT
         ws[f'B{row}'].font = Font(bold=True, size=11)
         row += 1
         ws[f'A{row}'].value = "O'rtacha to'lov/kun:"
         ws[f'B{row}'].value = stats['avg_wage_per_day']
-        ws[f'B{row}'].number_format = '$#,##0.00'
+        ws[f'B{row}'].number_format = MONEY_FORMAT
         row += 2
 
         # Detail table
         row += 1
-        headers = ["Sana", "Kelish", "Ketish", "Soatlar", "To'lov ($)"]
+        headers = ["Sana", "Kelish", "Ketish", "Soatlar", "To'lov (so'm)"]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=row, column=col)
             cell.value = header
@@ -275,7 +278,7 @@ def create_employee_detailed_excel(user_id, days=30, filename=None):
                 ws[f'D{row}'].value = hours
                 ws[f'D{row}'].number_format = '0.00'
                 ws[f'E{row}'].value = att['total_wage']
-                ws[f'E{row}'].number_format = '$#,##0.00'
+                ws[f'E{row}'].number_format = MONEY_FORMAT
 
                 row += 1
 

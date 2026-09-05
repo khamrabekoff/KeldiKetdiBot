@@ -34,8 +34,16 @@ def fmt_month(d):
     return f"{MONTHS_UZ[d.month - 1].capitalize()} {d.year}"
 
 
-def fmt_money(amount):
-    return f"${amount:.2f}"
+def fmt_money(amount, unit=True):
+    """5231481.42 -> "5 231 481 so'm"
+
+    Wages here run to seven digits, so the group separators carry the meaning
+    while the fraction never did - nothing is priced below one so'm. unit=False
+    drops the suffix inside the fixed-width <code> columns, where five more
+    characters wrap the line on a phone.
+    """
+    grouped = f"{round(amount or 0):,}".replace(',', ' ')
+    return f"{grouped} so'm" if unit else grouped
 
 
 def fmt_duration(minutes):
@@ -51,16 +59,16 @@ def fmt_duration(minutes):
 
 def fmt_rate(rates):
     """Human-readable rate. Per-minute is the type actually in use, so it gets
-    an hourly equivalent alongside it (a bare $/minute figure is hard to judge)."""
+    an hourly equivalent alongside it (a bare per-minute figure is hard to judge)."""
     stype = rates.get('salary_type', 'tariff')
     if stype == 'per_minute':
         per_min = rates.get('rate_per_minute', 0)
-        return f"${per_min:g}/daq  (~{fmt_money(per_min * 60)}/soat)"
+        return f"{per_min:g} so'm/daq  (~{fmt_money(per_min * 60)}/soat)"
     if stype == 'monthly':
         label = f"{fmt_money(rates.get('monthly_salary', 0))}/oy"
         override = rates.get('overtime_per_minute') or 0
         if override:
-            label += f"  (qo'shimcha ${override:g}/daq)"
+            label += f"  (qo'shimcha {override:g} so'm/daq)"
         return label
     return "Tarif"
 
@@ -209,8 +217,8 @@ def employee_stats_card(user_id):
         for r in reversed(recent):
             ci = r['check_in'].strftime('%H:%M')
             co = r['check_out'].strftime('%H:%M') if r['check_out'] else "—"
-            wage = fmt_money(r['total_wage'] or 0)
-            text += f"<code>{r['date'].strftime('%d.%m')}  {ci}-{co}  {wage:>7}</code>\n"
+            wage = fmt_money(r['total_wage'] or 0, unit=False)
+            text += f"<code>{r['date'].strftime('%d.%m')}  {ci}-{co}  {wage:>9}</code>\n"
     else:
         text += "\n<i>Bu oyda hali ma'lumot yo'q.</i>"
 
@@ -342,13 +350,13 @@ def admin_dashboard_card():
     if working:
         text += f"\n🟢 <b>Ishlayapti ({len(working)})</b>\n"
         for name, ci, wage in working:
-            text += f"<code>{name[:12]:<12} {ci.strftime('%H:%M')}  {fmt_money(wage):>7}</code>\n"
+            text += f"<code>{name[:12]:<12} {ci.strftime('%H:%M')}  {fmt_money(wage, unit=False):>9}</code>\n"
 
     if done:
         text += f"\n✅ <b>Ish tugatgan ({len(done)})</b>\n"
         for name, ci, co, wage in done:
             span = f"{ci.strftime('%H:%M')}-{co.strftime('%H:%M')}"
-            text += f"<code>{name[:12]:<12} {span}  {fmt_money(wage):>7}</code>\n"
+            text += f"<code>{name[:12]:<12} {span}  {fmt_money(wage, unit=False):>9}</code>\n"
 
     if absent:
         text += f"\n⚪️ <b>Kelmagan ({len(absent)})</b>\n"
@@ -469,7 +477,7 @@ def analytics_card(all_stats, days=30):
 
     text += f"\n{'━' * 18}\n💵 <b>Ish haqi bo'yicha</b>\n"
     for i, s in enumerate(all_stats, 1):
-        text += f"<code>{i}. {s['name'][:12]:<12} {fmt_money(s['total_wage']):>8}</code>\n"
+        text += f"<code>{i}. {s['name'][:12]:<12} {fmt_money(s['total_wage'], unit=False):>9}</code>\n"
 
     punctual = sorted(all_stats, key=lambda s: (s['late_days'], -s['days_worked']))
     text += f"\n{'━' * 18}\n⏰ <b>Vaqtida kelish bo'yicha</b>\n"
@@ -547,7 +555,7 @@ def admin_month_report_card(start_date):
         )
         if b['overtime']:
             text += (
-                f"<code>  {fmt_money(b['base'])} + {fmt_money(b['overtime'])} qo'shimcha</code>\n"
+                f"<code>  {fmt_money(b['base'], unit=False)} + {fmt_money(b['overtime'], unit=False)} qo'shimcha</code>\n"
                 f"<code>  = {fmt_money(b['wage'])}</code>\n\n"
             )
         else:

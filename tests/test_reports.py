@@ -7,6 +7,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# The Windows console is not UTF-8 by default and the reports carry emoji
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 os.environ['BOT_TOKEN'] = '123456:AAHtesttokenAAHtesttokenAAHtesttoken'
 os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'reports.db')

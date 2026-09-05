@@ -15,7 +15,7 @@ BTN_MONTH_STAT = "Oylik hisobot"
 
 MSG_CHECKED_IN = "Siz ishga kelganingiz qayd etildi: {time}. Hayrli kun!"
 MSG_CHECKED_IN_LATE = "Siz ishga kelganingiz qayd etildi: {time}.\n⚠️ <b>Diqqat!</b> Siz kechikdingiz. 09:00-10:00 oralig'i uchun sizga ish haqi yozilmadi."
-MSG_CHECKED_OUT = "Siz ishdan ketganingiz qayd etildi: {time}.\n\n{details}\n\n💰 Bugungi ish haqingiz: {wage} $."
+MSG_CHECKED_OUT = "Siz ishdan ketganingiz qayd etildi: {time}.\n\n{details}\n\n💰 Bugungi ish haqingiz: {wage}."
 
 MSG_ALREADY_CHECKED_IN  = "Siz bugun allaqachon kelgansiz."
 MSG_NOT_CHECKED_IN      = "Siz hali kelmagansiz, avval 'Keldim' tugmasini bosing."
@@ -42,7 +42,10 @@ MSG_INPUT_NAME  = "Xodim ismini kiriting:"
 MSG_SELECT_SALARY_TYPE = (
     "Ish haqi hisoblash turini tanlang:\n\n"
     "📊 <b>Tarif</b> — 4 ta vaqt oralig'i bo'yicha stavka\n"
-    "📅 <b>Oylik maosh</b> — oylik belgilangan summa + qo'shimcha ish stavkasi\n"
+    "📅 <b>Oylik maosh</b> — belgilangan oylik summa. U oyning ish kunlariga\n"
+    "bo'linadi (kalendar kunlar − yakshanbalar − rasmiy bayramlar): kam\n"
+    "ishlangan daqiqalar ushlab qolinadi, ortiqcha daqiqalar qo'shimcha\n"
+    "to'lanadi\n"
     "⏱ <b>Minutlik stavka</b> — har bir daqiqa uchun belgilangan summa"
 )
 BTN_SALARY_TARIFF     = "📊 Tarif"
@@ -50,18 +53,18 @@ BTN_SALARY_MONTHLY    = "📅 Oylik maosh"
 BTN_SALARY_PER_MINUTE = "⏱ Minutlik stavka"
 
 # Tariff rates
-MSG_INPUT_RATE_N        = "09:00 - 11:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
-MSG_INPUT_RATE_M        = "11:00 - 16:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
-MSG_INPUT_RATE_K        = "16:00 - 18:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
-MSG_INPUT_RATE_OVERTIME = "18:00 dan keyingi vaqt uchun soatlik to'lovni kiriting ($):"
+MSG_INPUT_RATE_N        = "09:00 - 11:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
+MSG_INPUT_RATE_M        = "11:00 - 16:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
+MSG_INPUT_RATE_K        = "16:00 - 18:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
+MSG_INPUT_RATE_OVERTIME = "18:00 dan keyingi vaqt uchun soatlik to'lovni kiriting (so'm):"
 
 # Monthly salary rates
 MSG_INPUT_MONTHLY_SALARY   = (
-    "Xodim uchun oylik maoshni kiriting ($):\n"
-    "<i>Masalan: 500</i>"
+    "Xodim uchun oylik maoshni kiriting (so'm):\n"
+    "<i>Masalan: 5000000</i>"
 )
 MSG_INPUT_OVERTIME_RATE    = (
-    "Qo'shimcha vaqt uchun daqiqalik to'lovni kiriting ($):\n"
+    "Qo'shimcha vaqt uchun daqiqalik to'lovni kiriting (so'm):\n"
     "<i>Ish vaqtidan oldin kelingan yoki keyin ketilgan har bir daqiqa uchun.</i>\n\n"
     "Avtomatik hisob: <b>{auto}</b>\n"
     "<i>{salary} / {working_days} ish kuni / {minutes} daqiqa</i>\n\n"
@@ -80,8 +83,8 @@ MSG_INPUT_HOLIDAY_DAYS     = (
 
 # Per-minute rate
 MSG_INPUT_RATE_PER_MINUTE  = (
-    "Bir daqiqa uchun to'lovni kiriting ($):\n"
-    "<i>Masalan: 0.036</i>"
+    "Bir daqiqa uchun to'lovni kiriting (so'm):\n"
+    "<i>Masalan: 400</i>"
 )
 
 MSG_EMP_ADDED = "Xodim qo'shildi!\nIsm: {name}\nTel: {phone}\nHisoblash turi: {salary_type}\n{rate_info}"
@@ -92,7 +95,7 @@ BTN_MY_STATS = "💰 Mening Hisobim"
 MSG_MY_STATS = (
     "📊 <b>Sizning hisobingiz</b> (Bu oy):\n\n"
     "📅 Ishlangan kunlar: {days}\n"
-    "💰 Jami ish haqi: {earned} $\n\n"
+    "💰 Jami ish haqi: {earned}\n\n"
     "<i>Eslatma: Bu summa toza hisoblanib, kechikkan vaqt uchun yozilmagan pullar inobatga olingan.</i>"
 )
 
@@ -100,7 +103,7 @@ MSG_BROADCAST_USAGE = "Foydalanish: /broadcast [ID] [Xabar]"
 MSG_BROADCAST_SENT  = "Xabar yuborildi."
 
 MSG_EDIT_USAGE    = "Tahrirlash: /edit [ID] [YYYY-MM-DD] [09:00] [18:00]"
-MSG_EDIT_SUCCESS  = "✅ Muvaffaqiyatli o'zgartirildi!\nYangi summa: {wage} $"
+MSG_EDIT_SUCCESS  = "✅ Muvaffaqiyatli o'zgartirildi!\nYangi summa: {wage}"
 MSG_EDIT_ERROR    = "Xatolik: {e}"
 
 # Easy Edit Menu
@@ -112,7 +115,7 @@ MSG_CHOOSE_ACTION  = "👤 {name} - nima qilmoqchisiz?"
 MSG_CHOOSE_DATE    = "Qaysi kungi vaqtni o'zgartirmoqchisiz?"
 MSG_INPUT_TIME_IN  = "Kelgan vaqtini kiriting (masalan 09:15):"
 MSG_INPUT_TIME_OUT = "Ketgan vaqtini kiriting (masalan 18:30):"
-MSG_EDIT_ATT_CONFIRM = "✅ Yangilandi: {date}\n{ci} - {co}\nYangi ish haqi: {wage} $"
+MSG_EDIT_ATT_CONFIRM = "✅ Yangilandi: {date}\n{ci} - {co}\nYangi ish haqi: {wage}"
 
 # Correction Request
 BTN_CORRECTION_REQUEST = "📝 Tuzatish so'rov"

@@ -5,6 +5,10 @@ os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'test.db')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Консоль Windows по умолчанию не cp65001 — без этого падаем на эмодзи в details
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 import database as db, workdays, utils
 
 db.init_db()

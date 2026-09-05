@@ -18,6 +18,12 @@ except ImportError:
     logger.warning("reportlab not installed. PDF export will be disabled.")
 
 
+def _money(amount):
+    """1234567.5 -> '1 234 568'. The unit lives in the column header, because
+    repeating "so'm" in every cell does not fit the narrow money column."""
+    return f"{round(amount or 0):,}".replace(',', ' ')
+
+
 def create_monthly_pdf_report(start_date):
     """Create PDF monthly report"""
     if not REPORTLAB_AVAILABLE:
@@ -56,7 +62,7 @@ def create_monthly_pdf_report(start_date):
             employee_totals[emp_name] += row['total_wage']
 
         # Create table data
-        data = [['Ism', 'Sana', 'Kelish', 'Ketish', 'To\'lov ($)']]
+        data = [['Ism', 'Sana', 'Kelish', 'Ketish', 'To\'lov (so\'m)']]
 
         current_employee = None
         employee_subtotal = 0
@@ -66,7 +72,7 @@ def create_monthly_pdf_report(start_date):
 
             if current_employee and current_employee != emp_name:
                 # Add subtotal row
-                data.append([f'<b>Jami {current_employee}</b>', '', '', '', f'<b>${employee_subtotal:.2f}</b>'])
+                data.append([f'<b>Jami {current_employee}</b>', '', '', '', f'<b>{_money(employee_subtotal)}</b>'])
                 employee_subtotal = 0
 
             check_in = row['check_in'].strftime("%H:%M") if row['check_in'] else "--"
@@ -77,7 +83,7 @@ def create_monthly_pdf_report(start_date):
                 str(row['date']),
                 check_in,
                 check_out,
-                f"${row['total_wage']:.2f}"
+                _money(row['total_wage'])
             ])
 
             employee_subtotal += row['total_wage']
@@ -85,11 +91,11 @@ def create_monthly_pdf_report(start_date):
 
         # Final subtotal
         if current_employee:
-            data.append([f'<b>Jami {current_employee}</b>', '', '', '', f'<b>${employee_subtotal:.2f}</b>'])
+            data.append([f'<b>Jami {current_employee}</b>', '', '', '', f'<b>{_money(employee_subtotal)}</b>'])
 
         # Add total
         total_wage = sum(employee_totals.values())
-        data.append(['', '', '', '<b>JAMI</b>', f'<b>${total_wage:.2f}</b>'])
+        data.append(['', '', '', '<b>JAMI</b>', f'<b>{_money(total_wage)}</b>'])
 
         # Create table
         table = Table(data, colWidths=[1.5*inch, 1*inch, 0.8*inch, 0.8*inch, 1*inch])
@@ -184,10 +190,10 @@ def create_employee_pdf_report(user_id, days=30):
             ['Ishlagan kunlar', str(stats['days_worked'])],
             ['Jami soatlar', f"{stats['total_hours']:.1f}h"],
             ['O\'rtacha soat/kun', f"{stats.get('avg_hours_per_day', 0):.1f}h"],
-            ['Asosiy to\'lov', f"${stats.get('total_base', 0):.2f}"],
-            ['Qo\'shimcha', f"${stats.get('total_overtime', 0):.2f}"],
-            ['Jami to\'lov', f"${stats['total_wage']:.2f}"],
-            ['O\'rtacha to\'lov/kun', f"${stats['avg_wage_per_day']:.2f}"],
+            ['Asosiy to\'lov', f"{_money(stats.get('total_base', 0))} so'm"],
+            ['Qo\'shimcha', f"{_money(stats.get('total_overtime', 0))} so'm"],
+            ['Jami to\'lov', f"{_money(stats['total_wage'])} so'm"],
+            ['O\'rtacha to\'lov/kun', f"{_money(stats['avg_wage_per_day'])} so'm"],
             ['Opozdilar', str(stats['late_days'])],
         ]
         stats_table = Table(stats_data, colWidths=[2*inch, 2*inch])
@@ -207,7 +213,7 @@ def create_employee_pdf_report(user_id, days=30):
         elements.append(heading)
         elements.append(Spacer(1, 0.1*inch))
 
-        detail_data = [['Sana', 'Kelish', 'Ketish', 'Soatlar', 'To\'lov']]
+        detail_data = [['Sana', 'Kelish', 'Ketish', 'Soatlar', 'To\'lov (so\'m)']]
         for att in attendance:
             if att['check_in'] and att['check_out']:
                 hours = (att['check_out'] - att['check_in']).total_seconds() / 3600
@@ -216,7 +222,7 @@ def create_employee_pdf_report(user_id, days=30):
                     att['check_in'].strftime("%H:%M"),
                     att['check_out'].strftime("%H:%M"),
                     f"{hours:.1f}",
-                    f"${att['total_wage']:.2f}"
+                    _money(att['total_wage'])
                 ])
 
         detail_table = Table(detail_data, colWidths=[1*inch, 0.9*inch, 0.9*inch, 0.8*inch, 1*inch])
