@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 ACTION_TYPES = {
     'user_added': 'Добавлен сотрудник',
     'user_deleted': 'Удален сотрудник',
+    'pending_user_deleted': 'Отменено приглашение',
     'rates_updated': 'Обновлены ставки',
     'attendance_manual': 'Вручную изменено время',
     'correction_approved': 'Тузатиш одобрена',

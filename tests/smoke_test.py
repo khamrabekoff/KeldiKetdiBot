@@ -51,7 +51,7 @@ for group in application.handlers.values():
             if entry_pattern is not None:
                 patterns.append(entry_pattern.pattern)
 
-for needed in ['^hol:open$', '^hol:m:', '^hol:del:', '^hol:add:']:
+for needed in ['^hol:open$', '^hol:m:', '^hol:del:', '^hol:add:', '^pdel:']:
     check(f"зарегистрирован {needed}", needed in patterns)
 
 print("\n2. Карточка настроек ведёт на праздники")
@@ -164,6 +164,19 @@ try:
     check("в рабочий день пишет", run_morning(datetime.date(2026, 9, 10)) == [555])
 finally:
     app.telegram_app, utils.get_now = real_app, real_now
+
+print("\n8. Добавленный сотрудник виден до того, как открыл бота")
+db.add_pending_user('998901112233', 'Yangi Xodim', 'monthly', monthly_salary=5_000_000)
+text, keyboard = ui.admin_employee_list()
+callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+check("имя в списке", 'Yangi Xodim' in text)
+check("помечен как ожидающий", 'Kutilmoqda' in text)
+check("сказано, что нужно прислать номер", 'raqam' in text)
+check("есть кнопка отмены приглашения", 'pdel:998901112233' in callbacks)
+
+check("приглашение снимается", db.delete_pending_user('998901112233'))
+text, _ = ui.admin_employee_list()
+check("после отмены его нет", 'Yangi Xodim' not in text)
 
 print("\n" + ("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ" if not failures else f"ПАДЕНИЙ: {len(failures)} -> {failures}"))
 sys.exit(0 if not failures else 1)

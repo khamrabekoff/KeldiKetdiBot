@@ -196,6 +196,41 @@ def get_pending_user(phone_suffix):
         return None
 
 
+def list_pending_users():
+    """Employees the admin has added who haven't opened the bot yet.
+
+    They have no Telegram id until they share their contact, so they cannot
+    live in `users` - but the admin still needs to see that they exist, or
+    adding someone looks like it did nothing.
+    """
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT phone, full_name, salary_type FROM pending_users ORDER BY full_name')
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error listing pending users: {e}")
+        return []
+
+
+def delete_pending_user(phone):
+    """Drop an invitation. The phone is the key, so a typo in it cannot be
+    corrected by re-adding - the wrong row has to go."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM pending_users WHERE phone = ?', (phone,))
+        removed = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+    except Exception as e:
+        logger.error(f"Error deleting pending user {phone}: {e}")
+        return False
+
+
 def promote_pending_to_user(telegram_id, full_phone, full_name, pending_row):
     try:
         conn = get_connection()

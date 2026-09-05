@@ -87,7 +87,11 @@ MSG_INPUT_RATE_PER_MINUTE  = (
     "<i>Masalan: 400</i>"
 )
 
-MSG_EMP_ADDED = "Xodim qo'shildi!\nIsm: {name}\nTel: {phone}\nHisoblash turi: {salary_type}\n{rate_info}"
+MSG_EMP_ADDED = (
+    "Xodim qo'shildi!\nIsm: {name}\nTel: {phone}\nHisoblash turi: {salary_type}\n{rate_info}\n\n"
+    "⏳ U ro'yxatda <b>Kutilmoqda</b> bo'lib turadi. Botni ochib, "
+    "<b>{phone}</b> raqamini yuborgach faollashadi."
+)
 BTN_BACK = "Ortga"
 
 # My Stats

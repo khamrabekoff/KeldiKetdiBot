@@ -379,11 +379,17 @@ def admin_employee_list():
 
     'Add employee' is an inline button here rather than a bottom-keyboard one,
     so opening this screen doesn't replace the admin's main menu (which used to
-    force a trip through an 'Ortga' button to get back)."""
+    force a trip through an 'Ortga' button to get back).
+
+    People the admin has added but who haven't opened the bot yet are listed
+    separately. They hold no Telegram id, so they are not in `users` at all -
+    and leaving them off this screen made adding an employee look like it had
+    silently failed."""
     employees = db.get_employees()
+    pending = db.list_pending_users()
     add_button = [InlineKeyboardButton("➕ Yangi xodim", callback_data="addemp")]
 
-    if not employees:
+    if not employees and not pending:
         return (
             "👥 <b>XODIMLAR</b>\n\n<i>Hali xodimlar qo'shilmagan.</i>",
             InlineKeyboardMarkup([add_button]),
@@ -396,6 +402,18 @@ def admin_employee_list():
         keyboard.append([InlineKeyboardButton(
             f"{dot}  {emp['full_name']}", callback_data=f"edit_{emp['id']}"
         )])
+
+    if pending:
+        text += (
+            f"\n\n⏳ <b>Kutilmoqda ({len(pending)})</b>\n"
+            f"<i>Botni ochib, o'z raqamlarini yuborishlari kerak:</i>\n"
+        )
+        for row in pending:
+            text += f"<code>{row['full_name']} · +{row['phone']}</code>\n"
+            keyboard.append([InlineKeyboardButton(
+                f"🗑  {row['full_name']} — bekor qilish", callback_data=f"pdel:{row['phone']}"
+            )])
+
     keyboard.append(add_button)
     return text, InlineKeyboardMarkup(keyboard)
 

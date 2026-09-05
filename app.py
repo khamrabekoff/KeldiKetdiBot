@@ -419,6 +419,24 @@ async def admin_employees_handler(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
 
 
+async def pending_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Withdraw an invitation nobody took up - usually a mistyped number.
+
+    The phone is the pending row's key, so a wrong one cannot be fixed by
+    adding the person again: the bad row would just sit there forever."""
+    query = update.callback_query
+    if not await check_admin(query.from_user.id):
+        await query.answer()
+        return
+    phone = query.data.split(':', 1)[1]
+    removed = db.delete_pending_user(phone)
+    if removed:
+        audit.log_action(query.from_user.id, 'pending_user_deleted', f"Bekor qilindi: {phone}")
+    await query.answer("Bekor qilindi" if removed else "Topilmadi")
+    text, keyboard = ui.admin_employee_list()
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+
+
 # ==================== MANAGE EMPLOYEE (edit rates / attendance / delete) ====================
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1237,7 +1255,7 @@ async def add_emp_rate_overtime(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Tarif', rate_info=rate_info
-        ))
+        ), parse_mode='HTML')
         user = db.get_user(update.effective_user.id)
         await show_main_menu(update, user)
         return ConversationHandler.END
@@ -1281,7 +1299,7 @@ async def add_emp_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Oylik maosh', rate_info=rate_info
-        ))
+        ), parse_mode='HTML')
         user = db.get_user(update.effective_user.id)
         await show_main_menu(update, user)
         return ConversationHandler.END
@@ -1307,7 +1325,7 @@ async def add_emp_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Minutlik stavka', rate_info=rate_info
-        ))
+        ), parse_mode='HTML')
         user = db.get_user(update.effective_user.id)
         await show_main_menu(update, user)
         return ConversationHandler.END
@@ -2000,6 +2018,7 @@ def create_application():
         app_config.add_handler(CallbackQueryHandler(holidays_open_callback, pattern="^hol:open$"))
         app_config.add_handler(CallbackQueryHandler(holidays_month_callback, pattern="^hol:m:"))
         app_config.add_handler(CallbackQueryHandler(holidays_delete_callback, pattern="^hol:del:"))
+        app_config.add_handler(CallbackQueryHandler(pending_delete_callback, pattern="^pdel:"))
 
         # Manage Employee Conversation (edit rates / attendance / delete)
         manage_emp_handler = ConversationHandler(
