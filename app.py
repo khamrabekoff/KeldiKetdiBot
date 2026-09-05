@@ -590,7 +590,7 @@ async def edit_rate_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_monthly_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = utils.validate_float(update.message.text)
     if val is None:
-        await update.message.reply_text("Raqam kiriting. Masalan: 500")
+        await update.message.reply_text("Raqam kiriting. Masalan: 5000000")
         return EDIT_MONTHLY_SALARY
     context.user_data['edit_monthly_salary'] = val
     prompt, keyboard = _overtime_rate_prompt(val)
@@ -623,7 +623,7 @@ async def edit_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = utils.validate_float(update.message.text)
     if val is None:
-        await update.message.reply_text("Raqam kiriting. Masalan: 0.036")
+        await update.message.reply_text("Raqam kiriting. Masalan: 400")
         return EDIT_RATE_PER_MINUTE
     user_id = context.user_data['edit_user_id']
     db.update_rates(user_id, 'per_minute', rate_per_minute=val)
