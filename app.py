@@ -124,6 +124,37 @@ async def on_handler_error(update, context):
         logger.warning("Telegram client is half-built - rebuilding on next update")
 
 
+async def _answer_quietly(query, text=None):
+    """Show the little toast on a button press, and shrug if it doesn't arrive.
+
+    The outbound proxy here returns 503 now and then. A failed toast used to
+    abort the whole handler, which left the screen showing state the database
+    had already changed - the press looked like it did nothing when it had in
+    fact worked."""
+    try:
+        await query.answer(text)
+    except Exception as e:
+        logger.warning(f"answer_callback_query skipped: {type(e).__name__}: {e}")
+
+
+async def _with_retry(call, attempts=3, delay=0.6):
+    """Retry one Telegram call through the flaky proxy.
+
+    `call` is a factory rather than a coroutine, because a coroutine can only
+    be awaited once. Used where the message being sent is the only thing that
+    tells the user what happened."""
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await call()
+        except (NetworkError, TimedOut) as e:
+            last_err = e
+            logger.warning(f"telegram call attempt {attempt}/{attempts}: {type(e).__name__}: {e}")
+            if attempt < attempts:
+                await asyncio.sleep(delay * attempt)
+    raise last_err
+
+
 def run_sync(coro, timeout=25):
     """Run one PTB coroutine on the long-lived loop, initializing on first use."""
     global _ptb_ready
@@ -426,15 +457,16 @@ async def pending_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     adding the person again: the bad row would just sit there forever."""
     query = update.callback_query
     if not await check_admin(query.from_user.id):
-        await query.answer()
+        await _answer_quietly(query)
         return
     phone = query.data.split(':', 1)[1]
     removed = db.delete_pending_user(phone)
     if removed:
         audit.log_action(query.from_user.id, 'pending_user_deleted', f"Bekor qilindi: {phone}")
-    await query.answer("Bekor qilindi" if removed else "Topilmadi")
+    await _answer_quietly(query, "Bekor qilindi" if removed else "Topilmadi")
     text, keyboard = ui.admin_employee_list()
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+    await _with_retry(lambda: query.edit_message_text(
+        text, reply_markup=keyboard, parse_mode='HTML'))
 
 
 # ==================== MANAGE EMPLOYEE (edit rates / attendance / delete) ====================
@@ -879,7 +911,7 @@ async def holidays_month_callback(update: Update, context: ContextTypes.DEFAULT_
 async def holidays_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await check_admin(query.from_user.id):
-        await query.answer()
+        await _answer_quietly(query)
         return
     day = datetime.strptime(query.data.split(':', 2)[2], '%Y-%m-%d').date()
     removed = db.remove_holiday(day)
@@ -887,8 +919,8 @@ async def holidays_delete_callback(update: Update, context: ContextTypes.DEFAULT
         recalculated = db.recalculate_month_wages(day.year, day.month)
         audit.log_action(query.from_user.id, 'holiday_removed',
                          f"{day.isoformat()} ({recalculated} kun qayta hisoblandi)")
-    await query.answer("O'chirildi" if removed else "Topilmadi")
-    await _render_holidays(query, day.year, day.month)
+    await _answer_quietly(query, "O'chirildi" if removed else "Topilmadi")
+    await _with_retry(lambda: _render_holidays(query, day.year, day.month))
 
 
 async def holidays_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):

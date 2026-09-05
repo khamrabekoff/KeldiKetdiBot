@@ -15,6 +15,8 @@ os.environ['BOT_TOKEN'] = '123456:AAHtesttokenAAHtesttokenAAHtesttoken'
 os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'smoke.db')
 
+from telegram.error import NetworkError  # noqa: E402
+
 import app  # noqa: E402
 import database as db  # noqa: E402
 import ui  # noqa: E402
@@ -177,6 +179,36 @@ check("есть кнопка отмены приглашения", 'pdel:9989011
 check("приглашение снимается", db.delete_pending_user('998901112233'))
 text, _ = ui.admin_employee_list()
 check("после отмены его нет", 'Yangi Xodim' not in text)
+
+print("\n9. Сбой прокси не срывает обработчик")
+
+
+class DeadQuery:
+    """Как ведёт себя query, когда прокси PythonAnywhere отдаёт 503."""
+
+    async def answer(self, text=None):
+        raise NetworkError("httpx.ProxyError: 503 Service Unavailable")
+
+
+toast_survived = True
+try:
+    asyncio.run(app._answer_quietly(DeadQuery(), "Bekor qilindi"))
+except Exception as e:
+    toast_survived = False
+check("упавший тост не бросает исключение", toast_survived)
+
+attempts = []
+
+
+async def flaky():
+    attempts.append(1)
+    if len(attempts) < 3:
+        raise NetworkError("httpx.ProxyError: 503 Service Unavailable")
+    return 'ok'
+
+
+check("перерисовка повторяется после 503",
+      asyncio.run(app._with_retry(flaky, delay=0)) == 'ok', f"попыток: {len(attempts)}")
 
 print("\n" + ("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ" if not failures else f"ПАДЕНИЙ: {len(failures)} -> {failures}"))
 sys.exit(0 if not failures else 1)
