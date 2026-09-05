@@ -66,6 +66,7 @@ def create_monthly_report_excel(start_date, filename=None):
                 'monthly_salary': row['monthly_salary'] if row['monthly_salary'] else 0,
                 'overtime_hourly_rate': row['overtime_hourly_rate'] if row['overtime_hourly_rate'] else 0,
                 'rate_per_minute': row['rate_per_minute'] if row['rate_per_minute'] else 0,
+                'overtime_per_minute': row['overtime_per_minute'] if row['overtime_per_minute'] else 0,
             }
 
             check_in = row['check_in']

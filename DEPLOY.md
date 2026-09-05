@@ -9,7 +9,7 @@
 
 ```bash
 git push origin main
-curl -s "https://keldiketdibot.pythonanywhere.com/deploy/<DEPLOY_SECRET>"
+curl -s "https://xamrobekov.pythonanywhere.com/deploy/<DEPLOY_SECRET>"
 ```
 
 Второй вызов делает на сервере `git pull` и перезапускает приложение.
@@ -67,7 +67,7 @@ curl -s ".../cron/reminders/<CRON_SECRET>?kind=evening&dry=1"
 внешний прокси возвращает 503. Само веб-приложение может.
 Поэтому напоминания запускаются не скриптом, а обращением к собственному адресу.
 
-**3. Задачи в расписании может не быть вовсе.** Аккаунту `keldiketdibot`
+**3. Задачи в расписании может не быть вовсе.** Аккаунту `xamrobekov`
 бесплатная ежедневная задача досталась и занята утренним напоминанием.
 Новым аккаунтам PythonAnywhere её больше не даёт — проверено на `xamrobekov`
 4 сентября 2026: вкладка Tasks предлагает только платный тариф.
@@ -97,7 +97,7 @@ curl -s ".../cron/reminders/<CRON_SECRET>?kind=evening&dry=1"
 Копии приходят админам в Telegram файлом `keldi_ketdi_YYYYMMDD_HHMM.db`.
 
 1. Скачать файл из Telegram на компьютер
-2. PythonAnywhere → **Files** → перейти в `/home/keldiketdibot/`
+2. PythonAnywhere → **Files** → перейти в `/home/xamrobekov/`
 3. Переименовать текущий `keldi_ketdi.db` (например в `keldi_ketdi_broken.db`) —
    **не удалять**, пока не убедитесь, что восстановление удалось
 4. Загрузить скачанный файл и переименовать в `keldi_ketdi.db`

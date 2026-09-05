@@ -1,4 +1,5 @@
 import sqlite3
+import calendar
 import datetime
 import os
 import logging
@@ -74,6 +75,8 @@ def init_db():
                 check_in TIMESTAMP,
                 check_out TIMESTAMP,
                 total_wage REAL DEFAULT 0,
+                base_wage REAL DEFAULT 0,
+                overtime_wage REAL DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
@@ -96,6 +99,17 @@ def init_db():
             )
         ''')
 
+        # Official days off the admin declares. Together with Sundays these are
+        # the days a monthly salary is NOT divided by.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS holidays (
+                date DATE PRIMARY KEY,
+                note TEXT,
+                created_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance(user_id, date)')
 
@@ -109,6 +123,10 @@ def init_db():
             ("pending_users", "overtime_hourly_rate", "REAL DEFAULT 0"),
             ("pending_users", "rate_per_minute", "REAL DEFAULT 0"),
             ("pending_users", "rate_overtime", "REAL DEFAULT 0"),
+            ("rates", "overtime_per_minute", "REAL DEFAULT 0"),
+            ("attendance", "base_wage", "REAL DEFAULT 0"),
+            ("attendance", "overtime_wage", "REAL DEFAULT 0"),
+            ("pending_users", "overtime_per_minute", "REAL DEFAULT 0"),
         ]
         for table, col, col_def in new_cols:
             try:
@@ -144,7 +162,8 @@ def add_user(telegram_id, phone, full_name, role='employee'):
 
 def add_pending_user(phone, full_name, salary_type,
                      rate_n=0, rate_m=0, rate_k=0, rate_overtime=0,
-                     monthly_salary=0, overtime_hourly_rate=0, rate_per_minute=0):
+                     monthly_salary=0, overtime_hourly_rate=0, rate_per_minute=0,
+                     overtime_per_minute=0):
     try:
         conn = get_connection()
         c = conn.cursor()
@@ -152,10 +171,10 @@ def add_pending_user(phone, full_name, salary_type,
         c.execute(
             '''INSERT OR REPLACE INTO pending_users
                (phone, full_name, salary_type, rate_n, rate_m, rate_k, rate_overtime,
-                monthly_salary, overtime_hourly_rate, rate_per_minute)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                monthly_salary, overtime_hourly_rate, rate_per_minute, overtime_per_minute)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (phone, full_name, salary_type, rate_n, rate_m, rate_k, rate_overtime,
-             monthly_salary, overtime_hourly_rate, rate_per_minute)
+             monthly_salary, overtime_hourly_rate, rate_per_minute, overtime_per_minute)
         )
         conn.commit()
         conn.close()
@@ -191,15 +210,17 @@ def promote_pending_to_user(telegram_id, full_phone, full_name, pending_row):
         overtime_hourly_rate = pending_row['overtime_hourly_rate'] if 'overtime_hourly_rate' in keys else 0
         rate_per_minute = pending_row['rate_per_minute'] if 'rate_per_minute' in keys else 0
         rate_overtime = pending_row['rate_overtime'] if 'rate_overtime' in keys else 0
+        overtime_per_minute = pending_row['overtime_per_minute'] if 'overtime_per_minute' in keys else 0
 
         c.execute(
             '''INSERT OR REPLACE INTO rates
                (user_id, salary_type, rate_n, rate_m, rate_k, rate_overtime,
-                monthly_salary, overtime_hourly_rate, rate_per_minute)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                monthly_salary, overtime_hourly_rate, rate_per_minute, overtime_per_minute)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (telegram_id, salary_type,
              pending_row['rate_n'], pending_row['rate_m'], pending_row['rate_k'],
-             rate_overtime, monthly_salary, overtime_hourly_rate, rate_per_minute)
+             rate_overtime, monthly_salary, overtime_hourly_rate, rate_per_minute,
+             overtime_per_minute)
         )
 
         c.execute('DELETE FROM pending_users WHERE phone = ?', (pending_row['phone'],))
@@ -360,11 +381,15 @@ def check_out_user(user_id, timestamp):
             return {'success': False, 'message': "Siz bugun allaqachon ketgansiz."}
 
         rates = get_db_rates(user_id)
-        from utils import calculate_wage
-        wage, details, _ = calculate_wage(row['check_in'], timestamp, rates)
+        from utils import calculate_wage, split_wage
+        wage, details, breakdown = calculate_wage(row['check_in'], timestamp, rates)
+        base, overtime = split_wage(wage, breakdown)
 
-        c.execute('UPDATE attendance SET check_out = ?, total_wage = ? WHERE id = ?',
-                  (timestamp, wage, row['id']))
+        c.execute(
+            'UPDATE attendance SET check_out = ?, total_wage = ?, base_wage = ?, '
+            'overtime_wage = ? WHERE id = ?',
+            (timestamp, wage, base, overtime, row['id'])
+        )
         conn.commit()
         conn.close()
         return {'success': True, 'wage': wage, 'check_in': row['check_in'], 'details': details}
@@ -380,7 +405,8 @@ def get_today_attendance(date_obj):
         c.execute('''
             SELECT u.full_name, a.check_in, a.check_out, a.total_wage,
                    r.salary_type, r.rate_n, r.rate_m, r.rate_k, r.rate_overtime,
-                   r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute
+                   r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute,
+                   r.overtime_per_minute
             FROM attendance a
             JOIN users u ON a.user_id = u.id
             LEFT JOIN rates r ON u.id = r.user_id
@@ -446,8 +472,10 @@ def get_month_attendance_details(start_date):
         c = conn.cursor()
         c.execute('''
             SELECT u.full_name, a.date, a.check_in, a.check_out, a.total_wage,
+                   a.base_wage, a.overtime_wage,
                    r.salary_type, r.rate_n, r.rate_m, r.rate_k, r.rate_overtime,
-                   r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute
+                   r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute,
+                   r.overtime_per_minute
             FROM attendance a
             JOIN users u ON a.user_id = u.id
             LEFT JOIN rates r ON u.id = r.user_id
@@ -467,7 +495,7 @@ def get_user_month_details(user_id, start_date):
         conn = get_connection()
         c = conn.cursor()
         c.execute('''
-            SELECT date, check_in, check_out, total_wage
+            SELECT date, check_in, check_out, total_wage, base_wage, overtime_wage
             FROM attendance
             WHERE user_id = ? AND date >= ?
             ORDER BY date ASC
@@ -511,17 +539,20 @@ def update_setting(key, value):
 
 def update_rates(user_id, salary_type,
                  rate_n=0, rate_m=0, rate_k=0, rate_overtime=0,
-                 monthly_salary=0, overtime_hourly_rate=0, rate_per_minute=0):
+                 monthly_salary=0, overtime_hourly_rate=0, rate_per_minute=0,
+                 overtime_per_minute=0):
     try:
         conn = get_connection()
         c = conn.cursor()
         c.execute(
             '''UPDATE rates SET
                    salary_type=?, rate_n=?, rate_m=?, rate_k=?, rate_overtime=?,
-                   monthly_salary=?, overtime_hourly_rate=?, rate_per_minute=?
+                   monthly_salary=?, overtime_hourly_rate=?, rate_per_minute=?,
+                   overtime_per_minute=?
                WHERE user_id=?''',
             (salary_type, rate_n, rate_m, rate_k, rate_overtime,
-             monthly_salary, overtime_hourly_rate, rate_per_minute, user_id)
+             monthly_salary, overtime_hourly_rate, rate_per_minute,
+             overtime_per_minute, user_id)
         )
         conn.commit()
         conn.close()
@@ -530,19 +561,25 @@ def update_rates(user_id, salary_type,
         raise
 
 
-def update_attendance_manual(user_id, date_obj, check_in_dt, check_out_dt, wage):
+def update_attendance_manual(user_id, date_obj, check_in_dt, check_out_dt, wage, breakdown=None):
+    """`breakdown` is the third value from calculate_wage; without it the whole
+    wage is recorded as base, which is what a wage with no overtime part is."""
+    from utils import split_wage
+    base, overtime = split_wage(wage, breakdown or {})
     try:
         conn = get_connection()
         c = conn.cursor()
         c.execute('SELECT id FROM attendance WHERE user_id = ? AND date = ?', (user_id, date_obj))
         row = c.fetchone()
         if row:
-            c.execute('''UPDATE attendance SET check_in=?, check_out=?, total_wage=? WHERE id=?''',
-                      (check_in_dt, check_out_dt, wage, row['id']))
+            c.execute('''UPDATE attendance SET check_in=?, check_out=?, total_wage=?,
+                                base_wage=?, overtime_wage=? WHERE id=?''',
+                      (check_in_dt, check_out_dt, wage, base, overtime, row['id']))
         else:
-            c.execute('''INSERT INTO attendance (user_id, date, check_in, check_out, total_wage)
-                         VALUES (?, ?, ?, ?, ?)''',
-                      (user_id, date_obj, check_in_dt, check_out_dt, wage))
+            c.execute('''INSERT INTO attendance (user_id, date, check_in, check_out,
+                                                 total_wage, base_wage, overtime_wage)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                      (user_id, date_obj, check_in_dt, check_out_dt, wage, base, overtime))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -579,7 +616,8 @@ def get_db_rates(user_id):
         if not rates:
             return {'salary_type': 'tariff', 'rate_n': 0, 'rate_m': 0, 'rate_k': 0,
                     'rate_overtime': 0, 'monthly_salary': 0,
-                    'overtime_hourly_rate': 0, 'rate_per_minute': 0}
+                    'overtime_hourly_rate': 0, 'rate_per_minute': 0,
+                    'overtime_per_minute': 0}
         keys = rates.keys()
         return {
             'salary_type': rates['salary_type'] if 'salary_type' in keys else 'tariff',
@@ -590,12 +628,14 @@ def get_db_rates(user_id):
             'monthly_salary': rates['monthly_salary'] if 'monthly_salary' in keys else 0,
             'overtime_hourly_rate': rates['overtime_hourly_rate'] if 'overtime_hourly_rate' in keys else 0,
             'rate_per_minute': rates['rate_per_minute'] if 'rate_per_minute' in keys else 0,
+            'overtime_per_minute': rates['overtime_per_minute'] if 'overtime_per_minute' in keys else 0,
         }
     except Exception as e:
         logger.error(f"Error getting rates for user {user_id}: {e}")
         return {'salary_type': 'tariff', 'rate_n': 0, 'rate_m': 0, 'rate_k': 0,
                 'rate_overtime': 0, 'monthly_salary': 0,
-                'overtime_hourly_rate': 0, 'rate_per_minute': 0}
+                'overtime_hourly_rate': 0, 'rate_per_minute': 0,
+                'overtime_per_minute': 0}
 
 
 def create_correction_request(user_id, date_str, check_in, check_out):
@@ -667,3 +707,146 @@ def get_pending_correction_requests():
     except Exception as e:
         logger.error(f"Error getting pending correction requests: {e}")
         return []
+
+
+# ==================== HOLIDAYS ====================
+# Official days off. A monthly salary is divided by the month's working days,
+# so every row here changes what a day of that month is worth.
+
+def is_holiday(day):
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM holidays WHERE date = ?', (day,))
+        found = c.fetchone() is not None
+        conn.close()
+        return found
+    except Exception as e:
+        logger.error(f"Error checking holiday {day}: {e}")
+        return False
+
+
+def get_holidays_in_month(year, month):
+    """Set of dates, for cheap membership tests while walking a month."""
+    try:
+        first = datetime.date(year, month, 1)
+        last = datetime.date(year, month, calendar.monthrange(year, month)[1])
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT date FROM holidays WHERE date BETWEEN ? AND ?', (first, last))
+        days = {row['date'] for row in c.fetchall()}
+        conn.close()
+        return days
+    except Exception as e:
+        logger.error(f"Error getting holidays for {year}-{month}: {e}")
+        return set()
+
+
+def list_holidays(year, month):
+    """Rows (date, note) for the admin panel, oldest first."""
+    try:
+        first = datetime.date(year, month, 1)
+        last = datetime.date(year, month, calendar.monthrange(year, month)[1])
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT date, note FROM holidays WHERE date BETWEEN ? AND ? ORDER BY date',
+                  (first, last))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error listing holidays for {year}-{month}: {e}")
+        return []
+
+
+def add_holiday(day, note=None, created_by=None):
+    """Returns False if the day was already marked."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO holidays (date, note, created_by) VALUES (?, ?, ?)',
+                  (day, note, created_by))
+        added = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return added
+    except Exception as e:
+        logger.error(f"Error adding holiday {day}: {e}")
+        raise
+
+
+def remove_holiday(day):
+    """Returns False if the day was not marked in the first place."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM holidays WHERE date = ?', (day,))
+        removed = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+    except Exception as e:
+        logger.error(f"Error removing holiday {day}: {e}")
+        raise
+
+
+def recalculate_month_wages(year, month, user_id=None):
+    """Rewrite the stored day wages of a month for monthly-salary employees.
+
+    Their day rate is the salary divided by the month's working days, so
+    declaring a holiday on the 20th changes what the 3rd was worth. Wages are
+    stored per day when an employee checks out, so those rows have to be
+    rewritten rather than recomputed on read - every report reads the stored
+    figure. Returns how many rows changed.
+    """
+    from utils import calculate_wage, split_wage
+    import workdays
+
+    try:
+        first = datetime.date(year, month, 1)
+        last = datetime.date(year, month, calendar.monthrange(year, month)[1])
+
+        conn = get_connection()
+        c = conn.cursor()
+        sql = '''SELECT a.id, a.user_id, a.date, a.check_in, a.check_out
+                 FROM attendance a
+                 JOIN rates r ON r.user_id = a.user_id
+                 WHERE a.date BETWEEN ? AND ?
+                   AND a.check_out IS NOT NULL
+                   AND r.salary_type = 'monthly' '''
+        params = [first, last]
+        if user_id is not None:
+            sql += 'AND a.user_id = ? '
+            params.append(user_id)
+        rows = c.execute(sql, params).fetchall()
+
+        if not rows:
+            conn.close()
+            return 0
+
+        # Rates and the month calendar are read before the first write, so the
+        # loop below is not opening fresh connections while holding the lock.
+        rates_by_user = {uid: get_db_rates(uid) for uid in {row['user_id'] for row in rows}}
+        context_for = workdays.month_calendar(year, month)
+
+        updated = 0
+        for row in rows:
+            wage, _, breakdown = calculate_wage(
+                row['check_in'], row['check_out'], rates_by_user[row['user_id']],
+                month_ctx=context_for(row['date'])
+            )
+            base, overtime = split_wage(wage, breakdown)
+            c.execute(
+                'UPDATE attendance SET total_wage = ?, base_wage = ?, overtime_wage = ? '
+                'WHERE id = ?',
+                (wage, base, overtime, row['id'])
+            )
+            updated += 1
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Recalculated {updated} wage rows for {year}-{month:02d}")
+        return updated
+    except Exception as e:
+        logger.error(f"Error recalculating wages for {year}-{month}: {e}")
+        raise

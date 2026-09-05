@@ -32,6 +32,8 @@ def get_employee_stats(user_id, days=30):
             'days': days,
             'total_minutes': 0.0,
             'total_wage': 0.0,
+            'total_base': 0.0,
+            'total_overtime': 0.0,
             'days_worked': 0,
             'late_days': 0,
             'avg_wage_per_day': 0.0,
@@ -45,6 +47,13 @@ def get_employee_stats(user_id, days=30):
                 continue
             stats['days_worked'] += 1
             stats['total_wage'] += row['total_wage'] or 0
+            # Rows predating the stored split carry zeros; count them as base.
+            base = row['base_wage'] or 0
+            overtime = row['overtime_wage'] or 0
+            if not base and not overtime:
+                base = row['total_wage'] or 0
+            stats['total_base'] += base
+            stats['total_overtime'] += overtime
             stats['total_minutes'] += (row['check_out'] - row['check_in']).total_seconds() / 60.0
 
             cutoff = row['check_in'].replace(

@@ -184,6 +184,8 @@ def create_employee_pdf_report(user_id, days=30):
             ['Ishlagan kunlar', str(stats['days_worked'])],
             ['Jami soatlar', f"{stats['total_hours']:.1f}h"],
             ['O\'rtacha soat/kun', f"{stats.get('avg_hours_per_day', 0):.1f}h"],
+            ['Asosiy to\'lov', f"${stats.get('total_base', 0):.2f}"],
+            ['Qo\'shimcha', f"${stats.get('total_overtime', 0):.2f}"],
             ['Jami to\'lov', f"${stats['total_wage']:.2f}"],
             ['O\'rtacha to\'lov/kun', f"${stats['avg_wage_per_day']:.2f}"],
             ['Opozdilar', str(stats['late_days'])],

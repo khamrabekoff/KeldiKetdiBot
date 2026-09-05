@@ -60,10 +60,22 @@ MSG_INPUT_MONTHLY_SALARY   = (
     "Xodim uchun oylik maoshni kiriting ($):\n"
     "<i>Masalan: 500</i>"
 )
-MSG_INPUT_OVERTIME_HOURLY  = (
-    "Ish soatidan tashqari vaqt (09:00 dan oldin yoki 18:00 dan keyin) uchun\n"
-    "soatlik to'lovni kiriting ($):\n"
-    "<i>Masalan: 2.5</i>"
+MSG_INPUT_OVERTIME_RATE    = (
+    "Qo'shimcha vaqt uchun daqiqalik to'lovni kiriting ($):\n"
+    "<i>Ish vaqtidan oldin kelingan yoki keyin ketilgan har bir daqiqa uchun.</i>\n\n"
+    "Avtomatik hisob: <b>{auto}</b>\n"
+    "<i>{salary} / {working_days} ish kuni / {minutes} daqiqa</i>\n\n"
+    "Avtomatik stavkani qoldirish uchun pastdagi tugmani bosing\n"
+    "yoki o'z summangizni yuboring."
+)
+BTN_AUTO_RATE = "✅ Avtomatik stavka"
+
+MSG_INPUT_HOLIDAY_DAYS     = (
+    "<b>{month}</b> uchun rasmiy dam olish kunlarini yuboring.\n\n"
+    "Kun raqamlari, vergul yoki bo'sh joy bilan: <code>8, 9</code>\n"
+    "Izoh qo'shish uchun: <code>8, 9 | Mustaqillik kuni</code>\n\n"
+    "Yakshanbalar allaqachon hisobga olingan — ularni kiritish shart emas.\n"
+    "Bekor qilish uchun /cancel"
 )
 
 # Per-minute rate

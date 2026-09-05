@@ -8,10 +8,13 @@ def get_now():
     return datetime.now(TZ_UZ).replace(tzinfo=None)
 
 
-def calculate_wage(check_in, check_out, rates):
+def calculate_wage(check_in, check_out, rates, month_ctx=None):
     """
     Вычисляет зарплату на основе типа оклада
-    rates: dict с ключами 'salary_type', 'rate_n', 'rate_m', 'rate_k', 'rate_overtime', 'monthly_salary', 'overtime_hourly_rate', 'rate_per_minute'
+    rates: dict с ключами 'salary_type', 'rate_n', 'rate_m', 'rate_k', 'rate_overtime', 'monthly_salary', 'overtime_hourly_rate', 'rate_per_minute', 'overtime_per_minute'
+    month_ctx: календарный контекст месяца (см. workdays.month_calendar).
+               Нужен только типу 'monthly'; передаётся, чтобы пересчёт целого
+               месяца не читал календарь заново на каждый день.
     """
     if not check_in or not check_out:
         return 0, "", {}
@@ -21,7 +24,7 @@ def calculate_wage(check_in, check_out, rates):
     if salary_type == 'per_minute':
         return _calculate_wage_per_minute(check_in, check_out, rates)
     elif salary_type == 'monthly':
-        return _calculate_wage_monthly(check_in, check_out, rates)
+        return _calculate_wage_monthly(check_in, check_out, rates, month_ctx)
     else:  # tariff
         return _calculate_wage_tariff(check_in, check_out, rates)
 
@@ -38,33 +41,62 @@ def _calculate_wage_per_minute(check_in, check_out, rates):
         return 0, f"Ошибка расчета: {e}", {}
 
 
-def _calculate_wage_monthly(check_in, check_out, rates):
-    """Расчет для месячного оклада"""
+def _calculate_wage_monthly(check_in, check_out, rates, month_ctx=None):
+    """Месячный оклад, разнесённый по минутам стандартного дня 09:00-18:00.
+
+    Рабочие дни месяца (календарные минус воскресенья минус официальные
+    выходные) превращают оклад в ставку за минуту. Минуты недоработки
+    вычитаются по этой ставке, минуты переработки оплачиваются по ставке
+    переработки — по умолчанию той же самой. Отработал стандартный день во все
+    рабочие дни — за месяц вышел ровно оклад.
+
+    В воскресенье и в официальный выходной стандартного дня нет, недорабатывать
+    нечего: там каждая отработанная минута идёт как переработка.
+    """
     try:
-        monthly_salary = rates.get('monthly_salary', 0)
-        overtime_hourly_rate = rates.get('overtime_hourly_rate', 0)
+        import workdays
 
-        work_start = check_in.replace(hour=9, minute=0, second=0, microsecond=0)
-        work_end = check_in.replace(hour=18, minute=0, second=0, microsecond=0)
+        ctx = month_ctx or workdays.month_context(check_in.date())
+        base_rate = workdays.base_rate_per_minute(rates.get('monthly_salary', 0) or 0, ctx)
+        overtime_rate = rates.get('overtime_per_minute') or base_rate
 
-        regular_wage = 0
-        overtime_wage = 0
+        if ctx['is_rest_day']:
+            overtime_minutes = max(0.0, (check_out - check_in).total_seconds() / 60.0)
+            wage = round(overtime_minutes * overtime_rate, 2)
+            details = f"🌙 Dam olish kuni: {overtime_minutes:.0f} daq qo'shimcha"
+            return wage, details, {'regular': 0.0, 'ot': wage,
+                                   'overtime_minutes': overtime_minutes,
+                                   'short_minutes': 0.0}
 
-        if check_in < work_start:
-            early_hours = (work_start - check_in).total_seconds() / 3600
-            overtime_wage += early_hours * overtime_hourly_rate
+        work_start = check_in.replace(hour=ctx['work_start'].hour,
+                                      minute=ctx['work_start'].minute,
+                                      second=0, microsecond=0)
+        work_end = check_in.replace(hour=ctx['work_end'].hour,
+                                    minute=ctx['work_end'].minute,
+                                    second=0, microsecond=0)
 
-        if check_out > work_end:
-            late_hours = (check_out - work_end).total_seconds() / 3600
-            overtime_wage += late_hours * overtime_hourly_rate
+        overtime_minutes = (max(0.0, (work_start - check_in).total_seconds() / 60.0)
+                            + max(0.0, (check_out - work_end).total_seconds() / 60.0))
+        short_minutes = (max(0.0, (check_in - work_start).total_seconds() / 60.0)
+                         + max(0.0, (work_end - check_out).total_seconds() / 60.0))
 
-        regular_hours = min(8, (min(check_out, work_end) - max(check_in, work_start)).total_seconds() / 3600)
-        if regular_hours > 0:
-            regular_wage = (monthly_salary / 20 / 8) * regular_hours
-
+        standard_minutes = ctx['standard_minutes']
+        paid_standard_minutes = max(0.0, standard_minutes - short_minutes)
+        regular_wage = paid_standard_minutes * base_rate
+        overtime_wage = overtime_minutes * overtime_rate
         total_wage = round(regular_wage + overtime_wage, 2)
-        details = f"💼 Base: {regular_wage:.2f}$ + OT: {overtime_wage:.2f}$"
-        return total_wage, details, {'regular': regular_wage, 'ot': overtime_wage}
+
+        parts = [f"💼 {paid_standard_minutes:.0f}/{standard_minutes} daq"]
+        if overtime_minutes:
+            parts.append(f"+{overtime_minutes:.0f} daq qo'shimcha")
+        if short_minutes:
+            parts.append(f"-{short_minutes:.0f} daq kam")
+        details = " · ".join(parts)
+
+        return total_wage, details, {'regular': round(regular_wage, 2),
+                                     'ot': round(overtime_wage, 2),
+                                     'overtime_minutes': overtime_minutes,
+                                     'short_minutes': short_minutes}
     except Exception as e:
         return 0, f"Ошибка расчета: {e}", {}
 
@@ -111,6 +143,18 @@ def _calculate_wage_tariff(check_in, check_out, rates):
         return total_wage, details, breakdown
     except Exception as e:
         return 0, f"Ошибка расчета: {e}", {}
+
+
+def split_wage(total_wage, breakdown):
+    """(base, overtime) for storage and reporting.
+
+    The three salary types describe themselves differently, but each reports
+    its overtime part under 'ot' (per-minute pay has none). Deriving the base
+    by subtraction rather than re-adding the pieces guarantees the two halves
+    always sum back to the stored total.
+    """
+    overtime = round(breakdown.get('ot', 0) or 0, 2)
+    return round((total_wage or 0) - overtime, 2), overtime
 
 
 def format_currency(amount):

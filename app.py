@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import calendar
 import os
 import re
 import subprocess
@@ -25,6 +26,7 @@ import excel_export
 import pdf_export
 import settings
 import ui
+import workdays
 from config import BOT_TOKEN, WEBHOOK_URL, WEBHOOK_DOMAIN, ADMIN_SECRET, FLASK_PORT, CRON_SECRET, DEPLOY_SECRET, BOT_VERSION
 
 logging.basicConfig(
@@ -152,13 +154,14 @@ def run_sync(coro, timeout=25):
 # States for conversations
 ADD_NAME, ADD_PHONE, ADD_SALARY_TYPE = range(3)
 ADD_RATE_N, ADD_RATE_M, ADD_RATE_K, ADD_RATE_OVERTIME = range(3, 7)
-ADD_MONTHLY_SALARY, ADD_OVERTIME_HOURLY, ADD_RATE_PER_MINUTE = range(7, 10)
+ADD_MONTHLY_SALARY, ADD_OVERTIME_RATE, ADD_RATE_PER_MINUTE = range(7, 10)
 EDIT_SALARY_TYPE = 10
 EDIT_RATE_N, EDIT_RATE_M, EDIT_RATE_K, EDIT_RATE_OVERTIME = range(11, 15)
-EDIT_MONTHLY_SALARY, EDIT_OVERTIME_HOURLY, EDIT_RATE_PER_MINUTE = range(15, 18)
+EDIT_MONTHLY_SALARY, EDIT_OVERTIME_RATE, EDIT_RATE_PER_MINUTE = range(15, 18)
 ACTION_MENU, EDIT_ATT_DATE, EDIT_ATT_IN, EDIT_ATT_OUT = range(18, 22)
 COR_REQ_DATE, COR_REQ_IN, COR_REQ_OUT, COR_REQ_CONFIRM = range(22, 26)
 SET_TIME_VALUE = 26
+HOLIDAY_ADD = 27
 
 telegram_app = None
 
@@ -572,20 +575,27 @@ async def edit_monthly_salary(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Raqam kiriting. Masalan: 500")
         return EDIT_MONTHLY_SALARY
     context.user_data['edit_monthly_salary'] = val
-    await update.message.reply_text(msg.MSG_INPUT_OVERTIME_HOURLY, parse_mode='HTML')
-    return EDIT_OVERTIME_HOURLY
+    prompt, keyboard = _overtime_rate_prompt(val)
+    await update.message.reply_text(prompt, reply_markup=keyboard, parse_mode='HTML')
+    return EDIT_OVERTIME_RATE
 
 
-async def edit_overtime_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    val = utils.validate_float(update.message.text)
+async def edit_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 0 and the button mean the same thing: keep the rate derived from the salary.
+    text = update.message.text.strip()
+    val = 0.0 if text == msg.BTN_AUTO_RATE else utils.validate_float(text)
     if val is None:
-        await update.message.reply_text("Raqam kiriting. Masalan: 2.5")
-        return EDIT_OVERTIME_HOURLY
+        await update.message.reply_text("Raqam kiriting yoki tugmani bosing.")
+        return EDIT_OVERTIME_RATE
     user_id = context.user_data['edit_user_id']
     db.update_rates(user_id, 'monthly',
                     monthly_salary=context.user_data['edit_monthly_salary'],
-                    overtime_hourly_rate=val)
+                    overtime_per_minute=val)
     audit.log_rates_updated(update.effective_user.id, user_id, 'monthly')
+    # The salary just changed, so every already-stored day of this month is
+    # still priced off the old figure.
+    now = utils.get_now()
+    db.recalculate_month_wages(now.year, now.month, user_id)
     await update.message.reply_text("✅ Oylik maosh yangilandi!")
     user = db.get_user(update.effective_user.id)
     await show_main_menu(update, user)
@@ -638,8 +648,8 @@ async def edit_att_out_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         in_time = datetime.strptime(f"{date_str} {in_val}", "%Y-%m-%d %H:%M")
         out_time = datetime.strptime(f"{date_str} {out_val}", "%Y-%m-%d %H:%M")
         rates = db.get_db_rates(user_id)
-        wage, _, _ = utils.calculate_wage(in_time, out_time, rates)
-        db.update_attendance_manual(user_id, target_date, in_time, out_time, wage)
+        wage, _, breakdown = utils.calculate_wage(in_time, out_time, rates)
+        db.update_attendance_manual(user_id, target_date, in_time, out_time, wage, breakdown)
         audit.log_attendance_updated(update.effective_user.id, user_id, date_str, in_val, out_val)
         await update.message.reply_text(msg.MSG_EDIT_ATT_CONFIRM.format(date=date_str, ci=in_val, co=out_val, wage=f"{wage:.2f}"))
         user = db.get_user(update.effective_user.id)
@@ -785,6 +795,163 @@ async def settings_set_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('setting_key', None)
+    await update.message.reply_text("Bekor qilindi.", reply_markup=ui.admin_keyboard())
+    return ConversationHandler.END
+
+
+# ==================== HOLIDAYS ====================
+# Official days off. They shrink the month's working-day count, which is the
+# divisor behind every monthly salary - so each change recalculates the month.
+
+
+def _overtime_rate_prompt(monthly_salary):
+    """Ask for an overtime rate, showing what the salary already works out to.
+
+    A bare "$/minute" question is unanswerable without knowing the figure it
+    defaults to, so the prompt spells out the division.
+    """
+    context = workdays.month_context(utils.get_now().date())
+    auto = workdays.base_rate_per_minute(monthly_salary, context)
+    text = msg.MSG_INPUT_OVERTIME_RATE.format(
+        auto=f"${auto:.4f}/daq",
+        salary=f"${monthly_salary:,.0f}",
+        working_days=context['working_days'],
+        minutes=context['standard_minutes'],
+    )
+    keyboard = ReplyKeyboardMarkup(
+        [[msg.BTN_AUTO_RATE]], resize_keyboard=True, one_time_keyboard=True
+    )
+    return text, keyboard
+
+
+def _parse_month_token(token):
+    """'2026-09' -> (2026, 9)."""
+    year, month = token.split('-')
+    return int(year), int(month)
+
+
+async def _render_holidays(query, year, month):
+    text, keyboard = ui.holidays_card(year, month)
+    try:
+        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='HTML')
+    except BadRequest as e:
+        # Re-rendering an unchanged month is not an error worth surfacing.
+        if 'not modified' not in str(e).lower():
+            raise
+
+
+async def holidays_open_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return
+    now = utils.get_now()
+    await _render_holidays(query, now.year, now.month)
+
+
+async def holidays_month_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return
+    year, month = _parse_month_token(query.data.split(':', 2)[2])
+    await _render_holidays(query, year, month)
+
+
+async def holidays_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await check_admin(query.from_user.id):
+        await query.answer()
+        return
+    day = datetime.strptime(query.data.split(':', 2)[2], '%Y-%m-%d').date()
+    removed = db.remove_holiday(day)
+    if removed:
+        recalculated = db.recalculate_month_wages(day.year, day.month)
+        audit.log_action(query.from_user.id, 'holiday_removed',
+                         f"{day.isoformat()} ({recalculated} kun qayta hisoblandi)")
+    await query.answer("O'chirildi" if removed else "Topilmadi")
+    await _render_holidays(query, day.year, day.month)
+
+
+async def holidays_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
+    year, month = _parse_month_token(query.data.split(':', 2)[2])
+    context.user_data['holiday_month'] = (year, month)
+    await query.message.reply_text(
+        msg.MSG_INPUT_HOLIDAY_DAYS.format(month=ui.fmt_month(datetime(year, month, 1))),
+        parse_mode='HTML',
+    )
+    return HOLIDAY_ADD
+
+
+async def holidays_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = context.user_data.get('holiday_month')
+    if not target:
+        return ConversationHandler.END
+    year, month = target
+    days_in_month = calendar.monthrange(year, month)[1]
+
+    raw = update.message.text.strip()
+    note = None
+    if '|' in raw:
+        raw, note = raw.split('|', 1)
+        note = note.strip() or None
+
+    added, already, rejected = [], [], []
+    for token in re.split(r'[,\s]+', raw.strip()):
+        if not token:
+            continue
+        try:
+            if '-' in token:
+                day = datetime.strptime(token, '%Y-%m-%d').date()
+                if (day.year, day.month) != (year, month):
+                    rejected.append(token)
+                    continue
+            else:
+                number = int(token)
+                if not 1 <= number <= days_in_month:
+                    rejected.append(token)
+                    continue
+                day = datetime(year, month, number).date()
+        except ValueError:
+            rejected.append(token)
+            continue
+
+        if db.add_holiday(day, note, update.effective_user.id):
+            added.append(day)
+        else:
+            already.append(day)
+
+    if added:
+        recalculated = db.recalculate_month_wages(year, month)
+        audit.log_action(
+            update.effective_user.id, 'holiday_added',
+            f"{', '.join(day.isoformat() for day in added)} "
+            f"({recalculated} kun qayta hisoblandi)"
+        )
+
+    lines = []
+    if added:
+        lines.append("✅ Qo'shildi: " + ", ".join(str(day.day) for day in added))
+    if already:
+        lines.append("ℹ️ Allaqachon belgilangan: " + ", ".join(str(day.day) for day in already))
+    if rejected:
+        lines.append("⚠️ Tushunarsiz: " + ", ".join(rejected))
+    if not lines:
+        lines.append("Hech qanday kun kiritilmadi.")
+    await update.message.reply_text("\n".join(lines))
+
+    text, keyboard = ui.holidays_card(year, month)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+    context.user_data.pop('holiday_month', None)
+    return ConversationHandler.END
+
+
+async def holidays_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('holiday_month', None)
     await update.message.reply_text("Bekor qilindi.", reply_markup=ui.admin_keyboard())
     return ConversationHandler.END
 
@@ -1086,28 +1253,31 @@ async def add_emp_monthly_salary(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("Iltimos, to'g'ri raqam kiriting.")
             return ADD_MONTHLY_SALARY
         context.user_data['monthly_salary'] = val
-        await update.message.reply_text(msg.MSG_INPUT_OVERTIME_HOURLY, parse_mode='HTML')
-        return ADD_OVERTIME_HOURLY
+        prompt, keyboard = _overtime_rate_prompt(val)
+        await update.message.reply_text(prompt, reply_markup=keyboard, parse_mode='HTML')
+        return ADD_OVERTIME_RATE
     except ValueError:
         await update.message.reply_text("Iltimos, raqam kiriting.")
         return ADD_MONTHLY_SALARY
 
 
-async def add_emp_overtime_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_emp_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        val = utils.validate_float(update.message.text)
+        text = update.message.text.strip()
+        val = 0.0 if text == msg.BTN_AUTO_RATE else utils.validate_float(text)
         if val is None:
-            await update.message.reply_text("Iltimos, to'g'ri raqam kiriting.")
-            return ADD_OVERTIME_HOURLY
+            await update.message.reply_text("Iltimos, raqam kiriting yoki tugmani bosing.")
+            return ADD_OVERTIME_RATE
         data = context.user_data
         db.add_pending_user(
             data['new_emp_phone'], data['new_emp_name'],
             salary_type='monthly',
             monthly_salary=data['monthly_salary'],
-            overtime_hourly_rate=val
+            overtime_per_minute=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        rate_info = f"Oylik: {data['monthly_salary']}$ | OT soatlik: {val}$/soat"
+        overtime_label = f"{val}$/daq" if val else "avtomatik"
+        rate_info = f"Oylik: {data['monthly_salary']:,.0f}$ | Qo'shimcha: {overtime_label}"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Oylik maosh', rate_info=rate_info
@@ -1117,7 +1287,7 @@ async def add_emp_overtime_hourly(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("Iltimos, raqam kiriting.")
-        return ADD_OVERTIME_HOURLY
+        return ADD_OVERTIME_RATE
 
 
 async def add_emp_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1260,8 +1430,8 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
     in_time = datetime.strptime(f"{date_str} {in_str}", "%Y-%m-%d %H:%M")
     out_time = datetime.strptime(f"{date_str} {out_str}", "%Y-%m-%d %H:%M")
     rates = db.get_db_rates(user_id)
-    wage, _, _ = utils.calculate_wage(in_time, out_time, rates)
-    db.update_attendance_manual(user_id, target_date, in_time, out_time, wage)
+    wage, _, breakdown = utils.calculate_wage(in_time, out_time, rates)
+    db.update_attendance_manual(user_id, target_date, in_time, out_time, wage, breakdown)
     audit.log_correction_approved(update.effective_user.id, user_id, date_str)
     await query.edit_message_text(f"{query.message.text}\n\n✅ Tasdiqlandi!")
     try:
@@ -1764,7 +1934,7 @@ def create_application():
                 ADD_RATE_K: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_rate_k)],
                 ADD_RATE_OVERTIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_rate_overtime)],
                 ADD_MONTHLY_SALARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_monthly_salary)],
-                ADD_OVERTIME_HOURLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_overtime_hourly)],
+                ADD_OVERTIME_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_overtime_rate)],
                 ADD_RATE_PER_MINUTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_rate_per_minute)],
             },
             fallbacks=[],
@@ -1804,6 +1974,22 @@ def create_application():
         )
         app_config.add_handler(settings_conv)
 
+        # Holidays (admin marks official days off; each change reprices the month)
+        holidays_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(holidays_add_start, pattern="^hol:add:")],
+            states={
+                HOLIDAY_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, holidays_add_value)],
+            },
+            fallbacks=[CommandHandler("cancel", holidays_add_cancel)],
+            name="holidays_conv",
+            persistent=False,
+            allow_reentry=True,
+        )
+        app_config.add_handler(holidays_conv)
+        app_config.add_handler(CallbackQueryHandler(holidays_open_callback, pattern="^hol:open$"))
+        app_config.add_handler(CallbackQueryHandler(holidays_month_callback, pattern="^hol:m:"))
+        app_config.add_handler(CallbackQueryHandler(holidays_delete_callback, pattern="^hol:del:"))
+
         # Manage Employee Conversation (edit rates / attendance / delete)
         manage_emp_handler = ConversationHandler(
             entry_points=[
@@ -1821,7 +2007,7 @@ def create_application():
                 EDIT_RATE_K: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_rate_k)],
                 EDIT_RATE_OVERTIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_rate_overtime)],
                 EDIT_MONTHLY_SALARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_monthly_salary)],
-                EDIT_OVERTIME_HOURLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_overtime_hourly)],
+                EDIT_OVERTIME_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_overtime_rate)],
                 EDIT_RATE_PER_MINUTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_rate_per_minute)],
                 EDIT_ATT_DATE: [CallbackQueryHandler(edit_att_date_callback, pattern="^edt_dt_")],
                 EDIT_ATT_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_att_in_handler)],

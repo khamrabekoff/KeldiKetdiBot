@@ -3,12 +3,14 @@
 Kept separate from handler logic so the wording/layout of every screen lives
 in one place. All user-facing text is Uzbek.
 """
+import calendar
 from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 import database as db
 import utils
+import workdays
 
 # ==================== FORMATTING HELPERS ====================
 
@@ -55,8 +57,27 @@ def fmt_rate(rates):
         per_min = rates.get('rate_per_minute', 0)
         return f"${per_min:g}/daq  (~{fmt_money(per_min * 60)}/soat)"
     if stype == 'monthly':
-        return f"{fmt_money(rates.get('monthly_salary', 0))}/oy"
+        label = f"{fmt_money(rates.get('monthly_salary', 0))}/oy"
+        override = rates.get('overtime_per_minute') or 0
+        if override:
+            label += f"  (qo'shimcha ${override:g}/daq)"
+        return label
     return "Tarif"
+
+
+def wage_parts(row):
+    """(base, overtime) for one attendance row.
+
+    Rows written before the split was stored carry two zeros; their whole total
+    counts as base, which is what it actually was for the per-minute employees
+    who produced them.
+    """
+    total = row['total_wage'] or 0
+    base = row['base_wage'] or 0
+    overtime = row['overtime_wage'] or 0
+    if not base and not overtime:
+        return total, 0.0
+    return base, overtime
 
 
 def worked_minutes(check_in, check_out):
@@ -144,22 +165,43 @@ def employee_stats_card(user_id):
     rows = db.get_user_month_details(user_id, start)
 
     total_wage = 0.0
+    total_base = 0.0
+    total_overtime = 0.0
     total_mins = 0.0
     days = 0
     for r in rows:
         if r['check_in'] and r['check_out']:
             days += 1
             total_wage += r['total_wage'] or 0
+            base, overtime = wage_parts(r)
+            total_base += base
+            total_overtime += overtime
             total_mins += worked_minutes(r['check_in'], r['check_out'])
+
+    # On a monthly salary the month's working-day count is the figure the pay
+    # is divided by, so showing days worked without it says little.
+    rates = db.get_db_rates(user_id)
+    if rates.get('salary_type') == 'monthly':
+        expected = workdays.working_days_in_month(now.year, now.month)
+        days_line = f"📅 Ishlangan kunlar: <b>{days}</b> / {expected}\n"
+    else:
+        days_line = f"📅 Ishlangan kunlar: <b>{days}</b>\n"
 
     text = (
         f"📊 <b>MENING HISOBIM</b>\n"
         f"<i>{fmt_month(now)}</i>\n"
         f"{'━' * 18}\n\n"
-        f"📅 Ishlangan kunlar: <b>{days}</b>\n"
+        f"{days_line}"
         f"⏱ Jami vaqt: <b>{fmt_duration(total_mins)}</b>\n"
-        f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
     )
+    if total_overtime:
+        text += (
+            f"\n💼 Asosiy: <b>{fmt_money(total_base)}</b>\n"
+            f"⭐ Qo'shimcha: <b>{fmt_money(total_overtime)}</b>\n"
+            f"💰 Jami: <b>{fmt_money(total_wage)}</b>\n"
+        )
+    else:
+        text += f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
 
     recent = [r for r in rows if r['check_in']][-7:]
     if recent:
@@ -209,6 +251,61 @@ def settings_card():
     for key, label, value, desc in st.all_times():
         text += f"{label}: <b>{value}</b>\n<i>  {desc}</i>\n\n"
         keyboard.append([InlineKeyboardButton(f"{label} — {value}", callback_data=f"set:{key}")])
+
+    keyboard.append([InlineKeyboardButton("📅 Rasmiy dam olish kunlari", callback_data="hol:open")])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def holidays_card(year, month):
+    """Official days off for one month, and the working-day count they drive.
+
+    The count is spelled out (days - Sundays - holidays) because it is the
+    divisor behind every monthly salary: an admin who marks a day should see
+    straight away what it did to the month.
+    """
+    first = datetime(year, month, 1)
+    rows = db.list_holidays(year, month)
+    days_in_month = calendar.monthrange(year, month)[1]
+    sundays = sum(
+        1 for day in range(1, days_in_month + 1)
+        if datetime(year, month, day).weekday() == 6
+    )
+
+    text = (
+        f"📅 <b>RASMIY DAM OLISH KUNLARI</b>\n"
+        f"<i>{fmt_month(first)}</i>\n"
+        f"{'━' * 18}\n\n"
+        f"Ish kunlari: <b>{workdays.working_days_in_month(year, month)}</b>\n"
+        f"<i>{days_in_month} kun − {sundays} yakshanba − {len(rows)} bayram</i>\n\n"
+    )
+    if rows:
+        text += "<b>Belgilangan kunlar:</b>\n"
+        for row in rows:
+            note = f" — {row['note']}" if row['note'] else ""
+            text += f"• {fmt_date(row['date'])}{note}\n"
+        text += "\n"
+    else:
+        text += "<i>Bu oyda bayram kunlari belgilanmagan.</i>\n\n"
+    text += "<i>Oylik maosh shu ish kunlariga bo'linadi.</i>"
+
+    keyboard = [[InlineKeyboardButton(
+        "➕ Kun qo'shish", callback_data=f"hol:add:{year}-{month:02d}"
+    )]]
+    for row in rows:
+        keyboard.append([InlineKeyboardButton(
+            f"🗑 {fmt_date(row['date'])}",
+            callback_data=f"hol:del:{row['date'].isoformat()}"
+        )])
+
+    prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
+    keyboard.append([
+        InlineKeyboardButton(f"◀ {MONTHS_UZ[prev_month - 1].capitalize()}",
+                             callback_data=f"hol:m:{prev_year}-{prev_month:02d}"),
+        InlineKeyboardButton(f"{MONTHS_UZ[next_month - 1].capitalize()} ▶",
+                             callback_data=f"hol:m:{next_year}-{next_month:02d}"),
+    ])
 
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -314,11 +411,29 @@ def admin_employee_card(emp_id):
 
     month_rows = db.get_user_month_details(emp_id, now.replace(day=1).date())
     days = total_wage = total_mins = 0
+    total_base = total_overtime = 0.0
     for r in month_rows:
         if r['check_in'] and r['check_out']:
             days += 1
             total_wage += r['total_wage'] or 0
+            base, overtime = wage_parts(r)
+            total_base += base
+            total_overtime += overtime
             total_mins += worked_minutes(r['check_in'], r['check_out'])
+
+    if rates.get('salary_type') == 'monthly':
+        expected = workdays.working_days_in_month(now.year, now.month)
+        days_line = f"<code>Kunlar:  {days} / {expected}</code>\n"
+    else:
+        days_line = f"<code>Kunlar:  {days}</code>\n"
+
+    money_lines = f"<code>Hisob:   {fmt_money(total_wage)}</code>"
+    if total_overtime:
+        money_lines = (
+            f"<code>Asosiy:  {fmt_money(total_base)}</code>\n"
+            f"<code>Qo'shim: {fmt_money(total_overtime)}</code>\n"
+            f"<code>Jami:    {fmt_money(total_wage)}</code>"
+        )
 
     return (
         f"👤 <b>{emp['full_name'].upper()}</b>\n"
@@ -327,9 +442,9 @@ def admin_employee_card(emp_id):
         f"💵 Stavka: <b>{fmt_rate(rates)}</b>\n"
         f"{status}\n\n"
         f"📊 <b>{fmt_month(now)}</b>\n"
-        f"<code>Kunlar:  {days}</code>\n"
+        f"{days_line}"
         f"<code>Vaqt:    {fmt_duration(total_mins)}</code>\n"
-        f"<code>Hisob:   {fmt_money(total_wage)}</code>"
+        f"{money_lines}"
     )
 
 
@@ -405,10 +520,15 @@ def admin_month_report_card(start_date):
     per_employee = {}
     for r in rows:
         name = r['full_name']
-        bucket = per_employee.setdefault(name, {'wage': 0.0, 'days': 0, 'mins': 0.0})
+        bucket = per_employee.setdefault(
+            name, {'wage': 0.0, 'days': 0, 'mins': 0.0, 'base': 0.0, 'overtime': 0.0}
+        )
         if r['check_in'] and r['check_out']:
             bucket['days'] += 1
             bucket['wage'] += r['total_wage'] or 0
+            base, overtime = wage_parts(r)
+            bucket['base'] += base
+            bucket['overtime'] += overtime
             bucket['mins'] += worked_minutes(r['check_in'], r['check_out'])
 
     text = (
@@ -417,13 +537,24 @@ def admin_month_report_card(start_date):
         f"{'━' * 18}\n\n"
     )
     grand = 0.0
+    grand_overtime = 0.0
     for name, b in sorted(per_employee.items(), key=lambda kv: -kv[1]['wage']):
         grand += b['wage']
+        grand_overtime += b['overtime']
         text += (
             f"👤 <b>{name}</b>\n"
             f"<code>  {b['days']} kun · {fmt_duration(b['mins'])}</code>\n"
-            f"<code>  {fmt_money(b['wage'])}</code>\n\n"
         )
+        if b['overtime']:
+            text += (
+                f"<code>  {fmt_money(b['base'])} + {fmt_money(b['overtime'])} qo'shimcha</code>\n"
+                f"<code>  = {fmt_money(b['wage'])}</code>\n\n"
+            )
+        else:
+            text += f"<code>  {fmt_money(b['wage'])}</code>\n\n"
 
-    text += f"{'━' * 18}\n💵 <b>JAMI: {fmt_money(grand)}</b>"
+    text += f"{'━' * 18}\n"
+    if grand_overtime:
+        text += f"⭐ <b>Qo'shimcha: {fmt_money(grand_overtime)}</b>\n"
+    text += f"💵 <b>JAMI: {fmt_money(grand)}</b>"
     return text
