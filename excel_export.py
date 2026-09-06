@@ -1,6 +1,7 @@
 """Excel export with charts and formatting"""
 import io
 import database as db
+import utils
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -21,8 +22,7 @@ BORDER = Border(
     bottom=Side(style='thin')
 )
 
-# Wages are in so'm, which has no subunit worth showing at these figures.
-MONEY_FORMAT = '#,##0" so\'m"'
+MONEY_FORMAT = utils.EXCEL_MONEY_FORMAT
 
 
 def create_monthly_report_excel(start_date, filename=None):
@@ -46,7 +46,8 @@ def create_monthly_report_excel(start_date, filename=None):
         ws.row_dimensions[1].height = 25
 
         # Headers
-        headers = ["Ism", "Sana", "Kelish", "Ketish", "Turi", "Tafsilot", "Jami (so'm)"]
+        headers = ["Ism", "Sana", "Kelish", "Ketish", "Turi", "Tafsilot",
+                   f"Jami ({utils.CURRENCY_LABEL})"]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=3, column=col)
             cell.value = header
@@ -84,9 +85,10 @@ def create_monthly_report_excel(start_date, filename=None):
                 total = row['total_wage']
                 if stype == 'per_minute':
                     total_mins = (check_out - check_in).total_seconds() / 60.0
-                    tafsilot = f"{total_mins:.0f}min × {rates['rate_per_minute']:g}"
+                    tafsilot = f"{total_mins:.0f}min × {utils.format_rate(rates['rate_per_minute'])}"
                 elif stype == 'monthly':
-                    tafsilot = f"Base: {breakdown.get('regular', 0):,.0f}, OT: {breakdown.get('ot', 0):,.0f}"
+                    tafsilot = (f"Base: {utils.format_money(breakdown.get('regular', 0))}, "
+                                f"OT: {utils.format_money(breakdown.get('ot', 0))}")
                 else:
                     tafsilot = f"N:{breakdown['n']:.0f} M:{breakdown['m']:.0f} K:{breakdown['k']:.0f} OT:{breakdown['ot']:.0f}"
             else:
@@ -157,7 +159,7 @@ def create_monthly_report_excel(start_date, filename=None):
 
             # Prepare data for chart
             chart_sheet['A1'].value = "Ism"
-            chart_sheet['B1'].value = "Jami (so'm)"
+            chart_sheet['B1'].value = f"Jami ({utils.CURRENCY_LABEL})"
 
             row_num = 2
             for emp_name, wage in sorted(employee_totals.items(), key=lambda x: x[1], reverse=True):
@@ -170,7 +172,7 @@ def create_monthly_report_excel(start_date, filename=None):
             chart.type = "col"
             chart.style = 10
             chart.title = "Oylik to'lovlar"
-            chart.y_axis.title = 'To\'lov (so\'m)'
+            chart.y_axis.title = f"To'lov ({utils.CURRENCY_LABEL})"
             chart.x_axis.title = 'Xodimlar'
 
             data = Reference(chart_sheet, min_col=2, min_row=1, max_row=row_num-1)
@@ -260,7 +262,7 @@ def create_employee_detailed_excel(user_id, days=30, filename=None):
 
         # Detail table
         row += 1
-        headers = ["Sana", "Kelish", "Ketish", "Soatlar", "To'lov (so'm)"]
+        headers = ["Sana", "Kelish", "Ketish", "Soatlar", f"To'lov ({utils.CURRENCY_LABEL})"]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=row, column=col)
             cell.value = header

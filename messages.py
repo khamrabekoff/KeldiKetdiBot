@@ -53,18 +53,18 @@ BTN_SALARY_MONTHLY    = "📅 Oylik maosh"
 BTN_SALARY_PER_MINUTE = "⏱ Minutlik stavka"
 
 # Tariff rates
-MSG_INPUT_RATE_N        = "09:00 - 11:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
-MSG_INPUT_RATE_M        = "11:00 - 16:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
-MSG_INPUT_RATE_K        = "16:00 - 18:00 vaqt oralig'i uchun soatlik to'lovni kiriting (so'm):"
-MSG_INPUT_RATE_OVERTIME = "18:00 dan keyingi vaqt uchun soatlik to'lovni kiriting (so'm):"
+MSG_INPUT_RATE_N        = "09:00 - 11:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
+MSG_INPUT_RATE_M        = "11:00 - 16:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
+MSG_INPUT_RATE_K        = "16:00 - 18:00 vaqt oralig'i uchun soatlik to'lovni kiriting ($):"
+MSG_INPUT_RATE_OVERTIME = "18:00 dan keyingi vaqt uchun soatlik to'lovni kiriting ($):"
 
 # Monthly salary rates
 MSG_INPUT_MONTHLY_SALARY   = (
-    "Xodim uchun oylik maoshni kiriting (so'm):\n"
-    "<i>Masalan: 5000000</i>"
+    "Xodim uchun oylik maoshni kiriting ($):\n"
+    "<i>Masalan: 500</i>"
 )
 MSG_INPUT_OVERTIME_RATE    = (
-    "Qo'shimcha vaqt uchun daqiqalik to'lovni kiriting (so'm):\n"
+    "Qo'shimcha vaqt uchun daqiqalik to'lovni kiriting ($):\n"
     "<i>Ish vaqtidan oldin kelingan yoki keyin ketilgan har bir daqiqa uchun.</i>\n\n"
     "Avtomatik hisob: <b>{auto}</b>\n"
     "<i>{salary} / {working_days} ish kuni / {minutes} daqiqa</i>\n\n"
@@ -83,8 +83,8 @@ MSG_INPUT_HOLIDAY_DAYS     = (
 
 # Per-minute rate
 MSG_INPUT_RATE_PER_MINUTE  = (
-    "Bir daqiqa uchun to'lovni kiriting (so'm):\n"
-    "<i>Masalan: 400</i>"
+    "Bir daqiqa uchun to'lovni kiriting ($):\n"
+    "<i>Masalan: 0.036</i>"
 )
 
 MSG_EMP_ADDED = (

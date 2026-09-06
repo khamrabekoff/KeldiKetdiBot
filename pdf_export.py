@@ -3,6 +3,7 @@ import io
 import logging
 from datetime import datetime, timedelta
 import database as db
+import utils
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,9 @@ except ImportError:
 
 
 def _money(amount):
-    """1234567.5 -> '1 234 568'. The unit lives in the column header, because
-    repeating "so'm" in every cell does not fit the narrow money column."""
-    return f"{round(amount or 0):,}".replace(',', ' ')
+    """The bare number. The unit lives in the column header instead, because
+    repeating it in every cell does not fit the narrow money column."""
+    return utils.format_money(amount, unit=False)
 
 
 def create_monthly_pdf_report(start_date):
@@ -62,7 +63,7 @@ def create_monthly_pdf_report(start_date):
             employee_totals[emp_name] += row['total_wage']
 
         # Create table data
-        data = [['Ism', 'Sana', 'Kelish', 'Ketish', 'To\'lov (so\'m)']]
+        data = [['Ism', 'Sana', 'Kelish', 'Ketish', f"To'lov ({utils.CURRENCY_LABEL})"]]
 
         current_employee = None
         employee_subtotal = 0
@@ -190,10 +191,10 @@ def create_employee_pdf_report(user_id, days=30):
             ['Ishlagan kunlar', str(stats['days_worked'])],
             ['Jami soatlar', f"{stats['total_hours']:.1f}h"],
             ['O\'rtacha soat/kun', f"{stats.get('avg_hours_per_day', 0):.1f}h"],
-            ['Asosiy to\'lov', f"{_money(stats.get('total_base', 0))} so'm"],
-            ['Qo\'shimcha', f"{_money(stats.get('total_overtime', 0))} so'm"],
-            ['Jami to\'lov', f"{_money(stats['total_wage'])} so'm"],
-            ['O\'rtacha to\'lov/kun', f"{_money(stats['avg_wage_per_day'])} so'm"],
+            ["Asosiy to'lov", utils.format_money(stats.get('total_base', 0))],
+            ["Qo'shimcha", utils.format_money(stats.get('total_overtime', 0))],
+            ["Jami to'lov", utils.format_money(stats['total_wage'])],
+            ["O'rtacha to'lov/kun", utils.format_money(stats['avg_wage_per_day'])],
             ['Opozdilar', str(stats['late_days'])],
         ]
         stats_table = Table(stats_data, colWidths=[2*inch, 2*inch])
@@ -213,7 +214,7 @@ def create_employee_pdf_report(user_id, days=30):
         elements.append(heading)
         elements.append(Spacer(1, 0.1*inch))
 
-        detail_data = [['Sana', 'Kelish', 'Ketish', 'Soatlar', 'To\'lov (so\'m)']]
+        detail_data = [['Sana', 'Kelish', 'Ketish', 'Soatlar', f"To'lov ({utils.CURRENCY_LABEL})"]]
         for att in attendance:
             if att['check_in'] and att['check_out']:
                 hours = (att['check_out'] - att['check_in']).total_seconds() / 3600

@@ -121,7 +121,7 @@ check("6 сентября — выходной сам по себе", workdays.i
 check("7 сентября — рабочий", not workdays.is_rest_day(datetime.date(2026, 9, 7)))
 
 print("\n6. Подсказка ставки переработки")
-prompt, auto_keyboard = app._overtime_rate_prompt(5_000_000)
+prompt, auto_keyboard = app._overtime_rate_prompt(500)
 check("в подсказке 24 рабочих дня", '24 ish kuni' in prompt)
 check("в подсказке 540 минут", '540 daqiqa' in prompt)
 check("кнопка автоставки приложена",
@@ -168,7 +168,7 @@ finally:
     app.telegram_app, utils.get_now = real_app, real_now
 
 print("\n8. Добавленный сотрудник виден до того, как открыл бота")
-db.add_pending_user('998901112233', 'Yangi Xodim', 'monthly', monthly_salary=5_000_000)
+db.add_pending_user('998901112233', 'Yangi Xodim', 'monthly', monthly_salary=500)
 text, keyboard = ui.admin_employee_list()
 callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 check("имя в списке", 'Yangi Xodim' in text)

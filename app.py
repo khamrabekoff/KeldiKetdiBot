@@ -622,7 +622,7 @@ async def edit_rate_overtime(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_monthly_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = utils.validate_float(update.message.text)
     if val is None:
-        await update.message.reply_text("Raqam kiriting. Masalan: 5000000")
+        await update.message.reply_text("Raqam kiriting. Masalan: 500")
         return EDIT_MONTHLY_SALARY
     context.user_data['edit_monthly_salary'] = val
     prompt, keyboard = _overtime_rate_prompt(val)
@@ -655,7 +655,7 @@ async def edit_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = utils.validate_float(update.message.text)
     if val is None:
-        await update.message.reply_text("Raqam kiriting. Masalan: 400")
+        await update.message.reply_text("Raqam kiriting. Masalan: 0.036")
         return EDIT_RATE_PER_MINUTE
     user_id = context.user_data['edit_user_id']
     db.update_rates(user_id, 'per_minute', rate_per_minute=val)
@@ -857,13 +857,13 @@ async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _overtime_rate_prompt(monthly_salary):
     """Ask for an overtime rate, showing what the salary already works out to.
 
-    A bare "so'm per minute" question is unanswerable without knowing the
-    figure it defaults to, so the prompt spells out the division.
+    A bare "per minute" question is unanswerable without knowing the figure
+    it defaults to, so the prompt spells out the division.
     """
     context = workdays.month_context(utils.get_now().date())
     auto = workdays.base_rate_per_minute(monthly_salary, context)
     text = msg.MSG_INPUT_OVERTIME_RATE.format(
-        auto=f"{auto:,.4f}".replace(',', ' ') + " so'm/daq",
+        auto=f"{utils.CURRENCY_PREFIX}{auto:.4f}{utils.CURRENCY_SUFFIX}/daq",
         salary=ui.fmt_money(monthly_salary),
         working_days=context['working_days'],
         minutes=context['standard_minutes'],
@@ -1283,7 +1283,7 @@ async def add_emp_rate_overtime(update: Update, context: ContextTypes.DEFAULT_TY
             rate_k=data['rate_k'], rate_overtime=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        rate_info = f"N:{data['rate_n']} | M:{data['rate_m']} | K:{data['rate_k']} | OT:{val}  (so'm/soat)"
+        rate_info = f"N:{data['rate_n']} | M:{data['rate_m']} | K:{data['rate_k']} | OT:{val}  ({utils.CURRENCY_LABEL}/soat)"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Tarif', rate_info=rate_info
@@ -1326,7 +1326,7 @@ async def add_emp_overtime_rate(update: Update, context: ContextTypes.DEFAULT_TY
             overtime_per_minute=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        overtime_label = f"{val:g} so'm/daq" if val else "avtomatik"
+        overtime_label = f"{utils.format_rate(val)}/daq" if val else "avtomatik"
         rate_info = f"Oylik: {ui.fmt_money(data['monthly_salary'])} | Qo'shimcha: {overtime_label}"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
@@ -1353,7 +1353,7 @@ async def add_emp_rate_per_minute(update: Update, context: ContextTypes.DEFAULT_
             rate_per_minute=val
         )
         audit.log_user_added(update.effective_user.id, data['new_emp_name'], data['new_emp_phone'])
-        rate_info = f"Har daqiqa: {val:g} so'm/daq"
+        rate_info = f"Har daqiqa: {utils.format_rate(val)}/daq"
         await update.message.reply_text(msg.MSG_EMP_ADDED.format(
             name=data['new_emp_name'], phone=data['new_emp_phone'],
             salary_type='Minutlik stavka', rate_info=rate_info

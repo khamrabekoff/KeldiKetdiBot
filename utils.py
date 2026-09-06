@@ -3,6 +3,36 @@ from datetime import datetime, time
 
 TZ_UZ = pytz.timezone('Asia/Tashkent')
 
+# ==================== CURRENCY ====================
+# The only place that decides how money is written - the bot's screens, the
+# Excel export and the PDF all read these. For a suffixed unit such as so'm:
+# PREFIX = '', SUFFIX = " so'm", LABEL = "so'm", DECIMALS = 0, GROUP = ' ',
+# and an Excel pattern carrying the same suffix.
+CURRENCY_PREFIX = '$'
+CURRENCY_SUFFIX = ''
+CURRENCY_LABEL = '$'          # bare unit, for column headers
+CURRENCY_DECIMALS = 2
+CURRENCY_GROUP = ','          # thousands separator
+EXCEL_MONEY_FORMAT = '$#,##0.00'
+
+
+def format_money(amount, unit=True):
+    """208333.333 -> '$208,333.33'
+
+    unit=False drops the currency for the fixed-width <code> columns, where
+    the extra characters wrap the line on a phone and the column header
+    carries the unit instead.
+    """
+    grouped = f"{amount or 0:,.{CURRENCY_DECIMALS}f}".replace(',', CURRENCY_GROUP)
+    return f"{CURRENCY_PREFIX}{grouped}{CURRENCY_SUFFIX}" if unit else grouped
+
+
+def format_rate(value):
+    """A rate keeps its own precision: $0.036 per minute must not round to
+    $0.04 the way a wage total would."""
+    return f"{CURRENCY_PREFIX}{value:g}{CURRENCY_SUFFIX}"
+
+
 def get_now():
     """Get current time in Uzbekistan timezone"""
     return datetime.now(TZ_UZ).replace(tzinfo=None)
@@ -35,7 +65,7 @@ def _calculate_wage_per_minute(check_in, check_out, rates):
         total_minutes = (check_out - check_in).total_seconds() / 60.0
         rate_per_minute = rates.get('rate_per_minute', 0)
         wage = round(total_minutes * rate_per_minute, 2)
-        details = f"⏱ {total_minutes:.0f} daq × {rate_per_minute:g} so'm"
+        details = f"⏱ {total_minutes:.0f} daq × {format_rate(rate_per_minute)}"
         return wage, details, {'minutes': total_minutes}
     except Exception as e:
         return 0, f"Ошибка расчета: {e}", {}

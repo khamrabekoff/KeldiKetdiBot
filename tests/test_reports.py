@@ -35,7 +35,7 @@ def close(a, b, tol=1.0):
     return abs(a - b) <= tol
 
 
-SALARY = 5_000_000
+SALARY = 500
 YEAR, MONTH = 2026, 9
 EMP = 555
 
@@ -113,13 +113,13 @@ check("в тексте есть посчитанная ставка", f"{rate:.4
 
 print("\n7. Минутная ставка не сломалась")
 db.add_user(556, '998900000003', 'Minutchi')
-db.update_rates(556, 'per_minute', rate_per_minute=400)
+db.update_rates(556, 'per_minute', rate_per_minute=0.036)
 check_in = datetime.datetime(YEAR, MONTH, 7, 9, 0)
 check_out = datetime.datetime(YEAR, MONTH, 7, 18, 0)
 pm_rates = db.get_db_rates(556)
 wage, _, breakdown = utils.calculate_wage(check_in, check_out, pm_rates)
 db.update_attendance_manual(556, datetime.date(YEAR, MONTH, 7), check_in, check_out, wage, breakdown)
-check("минутная считает как раньше", close(wage, 540 * 400, 0.01), f"{wage:,.2f}")
+check("минутная считает как раньше", close(wage, 540 * 0.036, 0.01), f"{wage:,.2f}")
 pm_card = ui.employee_stats_card(556)
 check("у минутной нет лишней разбивки", 'Asosiy' not in pm_card)
 check("у минутной нет счётчика рабочих дней", ' / ' not in pm_card.split('Jami vaqt')[0])

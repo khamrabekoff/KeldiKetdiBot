@@ -13,7 +13,7 @@ import database as db, workdays, utils
 
 db.init_db()
 
-SALARY = 5_000_000
+SALARY = 500
 rates = {'salary_type': 'monthly', 'monthly_salary': SALARY, 'overtime_per_minute': 0}
 
 def dt(day, h, m=0):
@@ -55,9 +55,9 @@ print("\nВыходные:")
 w, d = wage(6, 10, 0, 14, 0); check("воскресенье 10:00-14:00", w, 240 * rate); print(f"        details: {d}")
 w, d = wage(8, 10, 0, 14, 0); check("праздник 10:00-14:00", w, 240 * rate); print(f"        details: {d}")
 
-print("\nОтдельная ставка переработки (админ задал 1000/мин):")
-custom = dict(rates, overtime_per_minute=1000)
-w, d = wage(7, 8, 0, 18, 0, custom); check("08:00-18:00, переработка по 1000", w, 540 * rate + 60 * 1000)
+print("\nОтдельная ставка переработки (админ задал 0.10/мин):")
+custom = dict(rates, overtime_per_minute=0.10)
+w, d = wage(7, 8, 0, 18, 0, custom); check("08:00-18:00, переработка по 0.10", w, 540 * rate + 60 * 0.10)
 print(f"        details: {d}")
 
 print("\nПересчёт месяца при добавлении праздника задним числом:")
