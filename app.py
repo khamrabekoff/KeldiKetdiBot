@@ -12,6 +12,7 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, NetworkError, TimedOut
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
 import openpyxl
@@ -124,6 +125,39 @@ async def on_handler_error(update, context):
         logger.warning("Telegram client is half-built - rebuilding on next update")
 
 
+class RetryingRequest(HTTPXRequest):
+    """Retry an outgoing call that the proxy refused to carry.
+
+    PythonAnywhere's outbound proxy answers 503 sporadically and PTB retries
+    nothing, so a single refusal surfaced as a message the bot never sent.
+    Inside a conversation that is worse than a lost reply: the step it was
+    raised in never returns a state, so the admin is left typing into a screen
+    that will not advance.
+
+    Only connection-phase failures are retried. Those never reached Telegram,
+    so re-sending cannot duplicate a message - a timeout is ambiguous about
+    that and is deliberately left alone.
+    """
+
+    RETRIES = 3
+    RETRY_DELAY = 0.5
+    RETRY_ON = ('ProxyError', 'ConnectError')
+
+    async def do_request(self, *args, **kwargs):
+        for attempt in range(1, self.RETRIES + 1):
+            try:
+                return await super().do_request(*args, **kwargs)
+            except NetworkError as e:
+                retriable = any(marker in str(e) for marker in self.RETRY_ON)
+                if attempt == self.RETRIES or not retriable:
+                    raise
+                logger.warning(
+                    f"proxy refused the call, retry {attempt}/{self.RETRIES - 1}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(self.RETRY_DELAY * attempt)
+
+
 async def _answer_quietly(query, text=None):
     """Show the little toast on a button press, and shrug if it doesn't arrive.
 
@@ -135,24 +169,6 @@ async def _answer_quietly(query, text=None):
         await query.answer(text)
     except Exception as e:
         logger.warning(f"answer_callback_query skipped: {type(e).__name__}: {e}")
-
-
-async def _with_retry(call, attempts=3, delay=0.6):
-    """Retry one Telegram call through the flaky proxy.
-
-    `call` is a factory rather than a coroutine, because a coroutine can only
-    be awaited once. Used where the message being sent is the only thing that
-    tells the user what happened."""
-    last_err = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return await call()
-        except (NetworkError, TimedOut) as e:
-            last_err = e
-            logger.warning(f"telegram call attempt {attempt}/{attempts}: {type(e).__name__}: {e}")
-            if attempt < attempts:
-                await asyncio.sleep(delay * attempt)
-    raise last_err
 
 
 def run_sync(coro, timeout=25):
@@ -465,8 +481,7 @@ async def pending_delete_callback(update: Update, context: ContextTypes.DEFAULT_
         audit.log_action(query.from_user.id, 'pending_user_deleted', f"Bekor qilindi: {phone}")
     await _answer_quietly(query, "Bekor qilindi" if removed else "Topilmadi")
     text, keyboard = ui.admin_employee_list()
-    await _with_retry(lambda: query.edit_message_text(
-        text, reply_markup=keyboard, parse_mode='HTML'))
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
 
 
 # ==================== MANAGE EMPLOYEE (edit rates / attendance / delete) ====================
@@ -920,7 +935,7 @@ async def holidays_delete_callback(update: Update, context: ContextTypes.DEFAULT
         audit.log_action(query.from_user.id, 'holiday_removed',
                          f"{day.isoformat()} ({recalculated} kun qayta hisoblandi)")
     await _answer_quietly(query, "O'chirildi" if removed else "Topilmadi")
-    await _with_retry(lambda: _render_holidays(query, day.year, day.month))
+    await _render_holidays(query, day.year, day.month)
 
 
 async def holidays_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1955,7 +1970,10 @@ def create_application():
     global telegram_app
 
     try:
-        app_config = Application.builder().token(BOT_TOKEN).build()
+        app_config = (Application.builder()
+                      .token(BOT_TOKEN)
+                      .request(RetryingRequest(connection_pool_size=256))
+                      .build())
 
         # Start command
         app_config.add_handler(CommandHandler("start", start))

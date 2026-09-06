@@ -15,7 +15,7 @@ os.environ['BOT_TOKEN'] = '123456:AAHtesttokenAAHtesttokenAAHtesttoken'
 os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'smoke.db')
 
-from telegram.error import NetworkError  # noqa: E402
+from telegram.error import NetworkError, TimedOut  # noqa: E402
 
 import app  # noqa: E402
 import database as db  # noqa: E402
@@ -197,18 +197,41 @@ except Exception as e:
     toast_survived = False
 check("упавший тост не бросает исключение", toast_survived)
 
-attempts = []
+# Транспорт повторяет вызов, который прокси не пропустил, но не трогает
+# таймаут: тот мог дойти до Telegram, и повтор продублировал бы сообщение.
+calls = []
 
 
-async def flaky():
-    attempts.append(1)
-    if len(attempts) < 3:
+async def fake_do_request(self, *args, **kwargs):
+    calls.append(1)
+    if len(calls) < 3:
         raise NetworkError("httpx.ProxyError: 503 Service Unavailable")
-    return 'ok'
+    return 200, b'{"ok": true}'
 
 
-check("перерисовка повторяется после 503",
-      asyncio.run(app._with_retry(flaky, delay=0)) == 'ok', f"попыток: {len(attempts)}")
+real_do_request = app.HTTPXRequest.do_request
+app.HTTPXRequest.do_request = fake_do_request
+try:
+    request = app.RetryingRequest()
+    request.RETRY_DELAY = 0
+    code, _ = asyncio.run(request.do_request('https://api.telegram.org', 'POST'))
+    check("вызов повторяется после 503", code == 200, f"попыток: {len(calls)}")
+
+    calls.clear()
+
+    async def always_timeout(self, *args, **kwargs):
+        calls.append(1)
+        raise TimedOut()
+
+    app.HTTPXRequest.do_request = always_timeout
+    timed_out = False
+    try:
+        asyncio.run(request.do_request('https://api.telegram.org', 'POST'))
+    except TimedOut:
+        timed_out = True
+    check("таймаут не повторяется", timed_out and len(calls) == 1, f"попыток: {len(calls)}")
+finally:
+    app.HTTPXRequest.do_request = real_do_request
 
 print("\n" + ("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ" if not failures else f"ПАДЕНИЙ: {len(failures)} -> {failures}"))
 sys.exit(0 if not failures else 1)
