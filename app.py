@@ -325,7 +325,11 @@ async def check_out_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = db.check_out_user(user_id, now)
 
     if result['success']:
-        note = f"<i>{result['details']}</i>\n\n<i>Ish kuningiz uchun rahmat!</i>"
+        # details spell out the money earned, so they follow the same switch
+        if settings.get_bool('show_employee_earnings'):
+            note = f"<i>{result['details']}</i>\n\n<i>Ish kuningiz uchun rahmat!</i>"
+        else:
+            note = "<i>Ish kuningiz uchun rahmat!</i>"
     else:
         note = f"⚠️ <i>{result['message']}</i>"
 
@@ -348,16 +352,20 @@ async def employee_month_handler(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     today = utils.get_now()
     start_date = today.replace(day=1)
-    total = db.get_user_month_wage(user_id, start_date)
+    show_earnings = settings.get_bool('show_employee_earnings')
     details = db.get_user_month_details(user_id, start_date)
     report = f"📅 Bu oydagi hisobot:\n\n"
     for row in details:
         d = row['date'].strftime('%d.%m')
         ci = row['check_in'].strftime('%H:%M') if row['check_in'] else "--:--"
         co = row['check_out'].strftime('%H:%M') if row['check_out'] else "--:--"
-        w = row['total_wage']
-        report += f"🔹 {d}: {ci} - {co} | {ui.fmt_money(w, unit=False)}\n"
-    report += f"\n💰 Jami: {ui.fmt_money(total)}"
+        line = f"🔹 {d}: {ci} - {co}"
+        if show_earnings:
+            line += f" | {ui.fmt_money(row['total_wage'], unit=False)}"
+        report += line + "\n"
+    if show_earnings:
+        total = db.get_user_month_wage(user_id, start_date)
+        report += f"\n💰 Jami: {ui.fmt_money(total)}"
     user = db.get_user(user_id)
     menu_markup = await get_main_menu_markup(user['role'], user_id)
     await update.message.reply_text(report, reply_markup=menu_markup)
@@ -856,6 +864,31 @@ async def settings_set_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text, keyboard = ui.settings_card()
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
     return ConversationHandler.END
+
+
+async def settings_toggle_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Flip an on/off setting and redraw the panel in place."""
+    query = update.callback_query
+    await query.answer()
+    if not await check_admin(query.from_user.id):
+        return
+
+    key = query.data.split(':', 1)[1]
+    if key not in settings.FLAG_SETTINGS:
+        return
+
+    new_value = not settings.get_bool(key)
+    settings.set_bool(key, new_value)
+    _, label, _ = settings.FLAG_SETTINGS[key]
+    audit.log_action(query.from_user.id, 'settings_changed',
+                     f"{label} -> {'ha' if new_value else 'yoq'}")
+
+    text, keyboard = ui.settings_card()
+    try:
+        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='HTML')
+    except BadRequest as e:
+        if 'not modified' not in str(e).lower():
+            raise
 
 
 async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2065,6 +2098,7 @@ def create_application():
             allow_reentry=True,
         )
         app_config.add_handler(holidays_conv)
+        app_config.add_handler(CallbackQueryHandler(settings_toggle_flag, pattern="^flag:"))
         app_config.add_handler(CallbackQueryHandler(holidays_open_callback, pattern="^hol:open$"))
         app_config.add_handler(CallbackQueryHandler(holidays_month_callback, pattern="^hol:m:"))
         app_config.add_handler(CallbackQueryHandler(holidays_delete_callback, pattern="^hol:del:"))

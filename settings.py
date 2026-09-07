@@ -19,6 +19,44 @@ TIME_SETTINGS = {
 }
 
 
+# key -> (default, Uzbek label, short description)
+# On/off switches. Each client runs the same code against its own database, so
+# a value set here is that client's policy and nobody else's.
+FLAG_SETTINGS = {
+    'show_employee_earnings': (
+        True,
+        "💰 Xodim ish haqini ko'radi",
+        "Xodim o'zi topgan pulni ko'ra oladimi",
+    ),
+}
+
+TRUE_VALUES = ('1', 'true', 'yes', 'on', 'ha')
+
+
+def get_bool(key):
+    """Read an on/off setting, falling back to its default if never set."""
+    default, _, _ = FLAG_SETTINGS[key]
+    raw = _get_raw(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in TRUE_VALUES
+
+
+def set_bool(key, value):
+    if key not in FLAG_SETTINGS:
+        return False
+    db.update_setting(key, 'true' if value else 'false')
+    return True
+
+
+def all_flags():
+    """[(key, label, current_value, description), ...] for rendering."""
+    return [
+        (key, label, get_bool(key), desc)
+        for key, (_, label, desc) in FLAG_SETTINGS.items()
+    ]
+
+
 def get_time(key):
     """Read a HH:MM setting, falling back to its default if unset or corrupt."""
     default, _, _ = TIME_SETTINGS[key]

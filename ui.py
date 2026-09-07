@@ -117,10 +117,12 @@ def employee_keyboard(user_id):
 def employee_status_card(user_id, full_name, note=None):
     """Status card an employee sees on /start, on check-in/out, and on refresh.
     Three states: not yet arrived, currently working, day finished."""
+    import settings as st
+
     now = utils.get_now()
     today = now.date()
     row = db.get_daily_attendance_for_user(user_id, today)
-    rates = db.get_db_rates(user_id)
+    show_earnings = st.get_bool('show_employee_earnings')
 
     header = (
         f"👤 <b>{full_name}</b>\n"
@@ -136,13 +138,14 @@ def employee_status_card(user_id, full_name, note=None):
     elif not row['check_out']:
         check_in = row['check_in']
         mins = worked_minutes(check_in, now)
-        live_wage, _, _ = utils.calculate_wage(check_in, now, rates)
         body = (
             "\n🟢 <b>ISHDASIZ</b>\n\n"
             f"📥 Kelgan vaqt: <b>{check_in.strftime('%H:%M')}</b>\n"
             f"⏱ Ishlagan: <b>{fmt_duration(mins)}</b>\n"
-            f"💰 Hozircha: <b>{fmt_money(live_wage)}</b>\n"
         )
+        if show_earnings:
+            live_wage, _, _ = utils.calculate_wage(check_in, now, db.get_db_rates(user_id))
+            body += f"💰 Hozircha: <b>{fmt_money(live_wage)}</b>\n"
     else:
         check_in, check_out = row['check_in'], row['check_out']
         mins = worked_minutes(check_in, check_out)
@@ -151,8 +154,9 @@ def employee_status_card(user_id, full_name, note=None):
             f"📥 Kelish: <b>{check_in.strftime('%H:%M')}</b>\n"
             f"📤 Ketish: <b>{check_out.strftime('%H:%M')}</b>\n"
             f"⏱ Jami: <b>{fmt_duration(mins)}</b>\n"
-            f"💰 Bugun: <b>{fmt_money(row['total_wage'] or 0)}</b>\n"
         )
+        if show_earnings:
+            body += f"💰 Bugun: <b>{fmt_money(row['total_wage'] or 0)}</b>\n"
 
     text = header + body
     if note:
@@ -196,13 +200,17 @@ def employee_stats_card(user_id):
         f"{days_line}"
         f"⏱ Jami vaqt: <b>{fmt_duration(total_mins)}</b>\n"
     )
-    if total_overtime:
+    import settings as st
+
+    # Where the client keeps pay to itself, this card stays a plain time sheet.
+    show_earnings = st.get_bool('show_employee_earnings')
+    if show_earnings and total_overtime:
         text += (
             f"\n💼 Asosiy: <b>{fmt_money(total_base)}</b>\n"
             f"⭐ Qo'shimcha: <b>{fmt_money(total_overtime)}</b>\n"
             f"💰 Jami: <b>{fmt_money(total_wage)}</b>\n"
         )
-    else:
+    elif show_earnings:
         text += f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
 
     recent = [r for r in rows if r['check_in']][-7:]
@@ -212,7 +220,8 @@ def employee_stats_card(user_id):
             ci = r['check_in'].strftime('%H:%M')
             co = r['check_out'].strftime('%H:%M') if r['check_out'] else "—"
             wage = fmt_money(r['total_wage'] or 0, unit=False)
-            text += f"<code>{r['date'].strftime('%d.%m')}  {ci}-{co}  {wage:>10}</code>\n"
+            tail = f"  {wage:>10}" if show_earnings else ""
+            text += f"<code>{r['date'].strftime('%d.%m')}  {ci}-{co}{tail}</code>\n"
     else:
         text += "\n<i>Bu oyda hali ma'lumot yo'q.</i>"
 
@@ -253,6 +262,11 @@ def settings_card():
     for key, label, value, desc in st.all_times():
         text += f"{label}: <b>{value}</b>\n<i>  {desc}</i>\n\n"
         keyboard.append([InlineKeyboardButton(f"{label} — {value}", callback_data=f"set:{key}")])
+
+    for key, label, value, desc in st.all_flags():
+        state = "✅ Ha" if value else "🚫 Yo'q"
+        text += f"{label}: <b>{state}</b>\n<i>  {desc}</i>\n\n"
+        keyboard.append([InlineKeyboardButton(f"{label} — {state}", callback_data=f"flag:{key}")])
 
     keyboard.append([InlineKeyboardButton("📅 Rasmiy dam olish kunlari", callback_data="hol:open")])
 
