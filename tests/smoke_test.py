@@ -233,5 +233,13 @@ try:
 finally:
     app.HTTPXRequest.do_request = real_do_request
 
+print("\nТокен не утекает в логи")
+import logging  # noqa: E402
+
+httpx_logger = logging.getLogger('httpx')
+check("httpx не пишет на INFO", not httpx_logger.isEnabledFor(logging.INFO),
+      f"уровень: {logging.getLevelName(httpx_logger.getEffectiveLevel())}")
+check("предупреждения httpx сохранены", httpx_logger.isEnabledFor(logging.WARNING))
+
 print("\n" + ("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ" if not failures else f"ПАДЕНИЙ: {len(failures)} -> {failures}"))
 sys.exit(0 if not failures else 1)

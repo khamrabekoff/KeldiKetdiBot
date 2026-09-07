@@ -34,6 +34,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+# httpx logs the full URL of every request it makes, and for Telegram the bot
+# token sits inside that URL - at INFO the token would be written to the error
+# log on every single action any employee takes.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
