@@ -16,10 +16,12 @@ os.environ['BOT_TOKEN'] = '123456:AAHtesttokenAAHtesttokenAAHtesttoken'
 os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'advances.db')
 
+import openpyxl  # noqa: E402
 from telegram.ext import ConversationHandler  # noqa: E402
 
 import app  # noqa: E402
 import database as db  # noqa: E402
+import excel_export  # noqa: E402
 import messages as msg  # noqa: E402
 import settings  # noqa: E402
 import ui  # noqa: E402
@@ -162,7 +164,7 @@ state, replies = say(app.advance_confirm, EMP, ui.BTN_ADVANCE_CONFIRM, ctx)
 check("диалог завершён", state == ConversationHandler.END)
 check("сотруднику подтверждение", 'Avans qayd etildi: $300.00' in replies[0])
 
-rows = db.get_advances(month_start, ui.next_month(month_start), EMP)
+rows = db.get_advances(month_start, utils.next_month(month_start), EMP)
 check("запись в базе одна", len(rows) == 1)
 check("сумма и описание сохранены", rows and rows[0]['amount'] == 300 and rows[0]['note'] == 'Ijara <tez>')
 first_id = rows[0]['id'] if rows else None
@@ -186,7 +188,7 @@ say(app.advance_amount, EMP, '100', ctx)
 state, replies = say(app.advance_note, EMP, ui.BTN_ADVANCE_SKIP_NOTE, ctx)
 check("без описания в подтверждении нет строки Izoh", 'Izoh' not in replies[0])
 say(app.advance_confirm, EMP, ui.BTN_ADVANCE_CONFIRM, ctx)
-rows = db.get_advances(month_start, ui.next_month(month_start), EMP)
+rows = db.get_advances(month_start, utils.next_month(month_start), EMP)
 check("вторая запись без описания", len(rows) == 2 and rows[1]['note'] is None)
 check("у админа итог за месяц $400.00", sent and '$400.00' in sent[0]['text'])
 
@@ -199,7 +201,7 @@ for step_text in ([], ['50'], ['50', 'izoh']):
         say(handler, EMP, text, ctx)
     state, replies = say(handlers[len(step_text)], EMP, msg.BTN_BACK, ctx)
     check(f"отмена после {len(step_text)} шагов", state == ConversationHandler.END and 'Bekor' in replies[0])
-check("лишних записей нет", len(db.get_advances(month_start, ui.next_month(month_start), EMP)) == 2)
+check("лишних записей нет", len(db.get_advances(month_start, utils.next_month(month_start), EMP)) == 2)
 
 state, replies = say(app.advance_start, ADMIN, ui.BTN_ADVANCE, FakeContext())
 check("админ диалог не начинает", state == ConversationHandler.END and not replies)
@@ -221,7 +223,8 @@ check("карточка у админа: аванс и остаток", 'Avans: 
 
 report = ui.admin_month_report_card(month_start)
 check("месячный отчёт: строка аванса", '− 400.00 avans' in report)
-check("месячный отчёт: итог и остаток", 'Avans: $400.00' in report and 'Qoldiq: -$373.00' in report)
+check("месячный отчёт: сколько заплатить сотруднику", "= -$373.00 to'lash kerak" in report)
+check("месячный отчёт: итоги", 'Avans: $400.00' in report and "TO'LASH KERAK: -$373.00" in report)
 print("     " + report.replace('\n', '\n     '))
 
 other_card = ui.admin_employee_card(OTHER)
@@ -233,6 +236,9 @@ db.add_advance(EMP, 50, 'eski', last_month_day)
 check("в этом месяце всё ещё $400", 'Avans: <b>$400.00</b>' in ui.employee_stats_card(EMP))
 last_report = ui.admin_month_report_card(last_month_day.date().replace(day=1))
 check("в отчёте прошлого месяца свой аванс $50", 'Avans: $50.00' in last_report)
+check("и нет дней этого месяца", 'JAMI: $0.00' in last_report and '0 kun' in last_report,
+      'раньше отчёт за прошлый месяц считал и текущий')
+check("к выплате за прошлый месяц -$50", "TO'LASH KERAK: -$50.00" in last_report)
 
 print("\n8. Админ отменяет аванс")
 sent.clear()
@@ -252,7 +258,39 @@ check("сотруднику второй раз не пишем", not sent)
 
 check("итог за месяц уменьшился до $100", 'Avans: <b>$100.00</b>' in ui.employee_stats_card(EMP))
 
-print("\n9. Разбор суммы и вывод денег")
+print("\n9. Excel")
+db.add_advance(OTHER, 20, 'Проезд', now)  # Cyrillic note, no days worked
+bio = excel_export.create_monthly_report_excel(month_start)
+check("файл создан", bio is not None)
+wb = openpyxl.load_workbook(bio)
+check("первый лист — «To'lov»", wb.sheetnames[0] == "To'lov" and wb.active.title == "To'lov", str(wb.sheetnames))
+pay = wb["To'lov"]
+table = {pay.cell(row=r, column=1).value: [pay.cell(row=r, column=c).value for c in range(2, 6)]
+         for r in range(4, pay.max_row + 1) if pay.cell(row=r, column=1).value}
+check("Mustafo: дни, заработок, аванс, к выплате", table.get('Mustafo') == [1, 27.0, 100.0, -73.0],
+      str(table.get('Mustafo')))
+check("Jasur без дней, только аванс", table.get('Jasur') == [0, 0.0, 20.0, -20.0], str(table.get('Jasur')))
+check("JAMI к выплате", table.get('JAMI') and table['JAMI'][1:] == [27.0, 120.0, -93.0], str(table.get('JAMI')))
+check("отменённый аванс не попал", 300.0 not in [v for row in table.values() for v in row])
+
+check("лист «Avanslar» есть", 'Avanslar' in wb.sheetnames)
+adv_sheet = wb['Avanslar']
+notes = [adv_sheet.cell(row=r, column=5).value for r in range(4, adv_sheet.max_row + 1)]
+check("описания в листе авансов", 'Проезд' in notes, str(notes))
+
+main = wb['Oylik Hisobot']
+main_values = [c.value for row in main.iter_rows() for c in row]
+check("в основном листе итог с колонкой «To'lash kerak»", any("To'lash kerak" in str(v) for v in main_values))
+
+print("\n10. PDF")
+import pdf_export  # noqa: E402
+pdf = pdf_export.create_monthly_pdf_report(month_start)
+check("PDF создан", pdf is not None and pdf.getvalue()[:4] == b'%PDF')
+check("шрифт с кириллицей подключён", pdf_export._unicode_fonts()[0] == 'KKSans', str(pdf_export._unicode_fonts()))
+pdf_last = pdf_export.create_monthly_pdf_report(last_month_day.date().replace(day=1))
+check("PDF за месяц только с авансом тоже создаётся", pdf_last is not None)
+
+print("\n11. Разбор суммы и вывод денег")
 cases = {
     '300': 300.0, '$300': 300.0, '300 $': 300.0, '1 500': 1500.0, '1,500': 1500.0,
     '12.5': 12.5, '12,5': 12.5, '0': None, '-5': None, 'abc': None, '': None, 'nan': None,

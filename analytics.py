@@ -75,6 +75,54 @@ def get_employee_stats(user_id, days=30):
         return None
 
 
+def month_payroll(start_date):
+    """One calendar month's pay per employee: earned, taken as advances, and
+    what the admin still has to pay.
+
+    The bot's monthly report, the Excel and the PDF all read this, so the three
+    can never disagree about what anyone is owed. 'rows' and 'advances' are
+    handed back as well for the exports' day-by-day and advance listings.
+    """
+    end_date = utils.next_month(start_date)
+    rows = db.get_month_attendance_details(start_date, end_date)
+    advances = db.get_advances(start_date, end_date)
+
+    people = {}
+
+    def person(name):
+        return people.setdefault(name, {
+            'name': name, 'days': 0, 'minutes': 0.0, 'wage': 0.0,
+            'base': 0.0, 'overtime': 0.0, 'advance': 0.0,
+        })
+
+    for row in rows:
+        entry = person(row['full_name'])
+        if not (row['check_in'] and row['check_out']):
+            continue
+        total = row['total_wage'] or 0
+        # Rows predating the stored split carry zeros; count them as base.
+        base = row['base_wage'] or 0
+        overtime = row['overtime_wage'] or 0
+        if not base and not overtime:
+            base = total
+        entry['days'] += 1
+        entry['wage'] += total
+        entry['base'] += base
+        entry['overtime'] += overtime
+        entry['minutes'] += (row['check_out'] - row['check_in']).total_seconds() / 60.0
+
+    for advance in advances:
+        person(advance['full_name'])['advance'] += advance['amount']
+
+    for entry in people.values():
+        entry['to_pay'] = entry['wage'] - entry['advance']
+
+    employees = sorted(people.values(), key=lambda e: -e['wage'])
+    totals = {key: sum(e[key] for e in employees)
+              for key in ('wage', 'overtime', 'advance', 'to_pay')}
+    return {'employees': employees, 'totals': totals, 'rows': rows, 'advances': advances}
+
+
 def get_all_employees_stats(days=30):
     """Stats for every employee, richest-earning first."""
     try:

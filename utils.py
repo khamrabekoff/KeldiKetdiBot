@@ -1,7 +1,7 @@
 import re
 
 import pytz
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 TZ_UZ = pytz.timezone('Asia/Tashkent')
 
@@ -64,6 +64,11 @@ def format_rate(value):
 def get_now():
     """Get current time in Uzbekistan timezone"""
     return datetime.now(TZ_UZ).replace(tzinfo=None)
+
+
+def next_month(day):
+    """First day of the month after `day`'s - the exclusive end of its month."""
+    return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
 def calculate_wage(check_in, check_out, rates, month_ctx=None):

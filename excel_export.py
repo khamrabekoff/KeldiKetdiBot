@@ -1,6 +1,8 @@
 """Excel export with charts and formatting"""
 import io
+import analytics
 import database as db
+import ui
 import utils
 from datetime import datetime
 from openpyxl import Workbook
@@ -23,14 +25,121 @@ BORDER = Border(
 )
 
 MONEY_FORMAT = utils.EXCEL_MONEY_FORMAT
+PAY_FILL = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+
+
+def _money_header(label):
+    return f"{label} ({utils.CURRENCY_LABEL})"
+
+
+def _header_row(ws, row, labels, width):
+    """Style columns 1..width of `row` as a header; `labels` is {column: text}."""
+    for col in range(1, width + 1):
+        cell = ws.cell(row=row, column=col)
+        cell.value = labels.get(col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER
+
+
+def _payroll_row(ws, row, name, days, money, width, total=False):
+    """One employee (or the JAMI line): name, days worked, and money columns.
+    The last money column is what is still to pay, so it is the one marked."""
+    ws.cell(row=row, column=1).value = name
+    if days is not None:
+        ws.cell(row=row, column=2).value = days
+    for col, amount in money.items():
+        ws.cell(row=row, column=col).value = round(amount, 2)
+        ws.cell(row=row, column=col).number_format = MONEY_FORMAT
+    pay_col = max(money)
+    for col in range(1, width + 1):
+        cell = ws.cell(row=row, column=col)
+        cell.border = BORDER
+        if total:
+            cell.font = TOTAL_FONT
+            cell.fill = TOTAL_FILL
+    ws.cell(row=row, column=pay_col).font = TOTAL_FONT
+    if total:
+        ws.cell(row=row, column=pay_col).fill = PAY_FILL
+
+
+def _add_payment_sheet(wb, payroll, start_date):
+    """The answer to 'how much do I still owe everyone', on the sheet the file
+    opens to, rather than below a hundred rows of days."""
+    ws = wb.create_sheet("To'lov", 0)
+    wb.active = 0
+
+    ws.merge_cells('A1:E1')
+    title = ws['A1']
+    title.value = f"💰 To'lov - {ui.fmt_month(start_date)}"
+    title.font = Font(bold=True, size=14, color="FFFFFF")
+    title.fill = PatternFill(start_color="203864", end_color="203864", fill_type="solid")
+    title.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 25
+
+    _header_row(ws, 3, {1: "Ism", 2: "Kunlar", 3: _money_header("Ish haqi"),
+                        4: _money_header("Avans"), 5: _money_header("To'lash kerak")}, 5)
+    row = 4
+    for emp in payroll['employees']:
+        _payroll_row(ws, row, emp['name'], emp['days'],
+                     {3: emp['wage'], 4: emp['advance'], 5: emp['to_pay']}, 5)
+        row += 1
+    totals = payroll['totals']
+    _payroll_row(ws, row, "JAMI", None,
+                 {3: totals['wage'], 4: totals['advance'], 5: totals['to_pay']}, 5, total=True)
+
+    ws.cell(row=row + 2, column=1).value = "To'lash kerak = Ish haqi − Avans"
+    ws.cell(row=row + 2, column=1).font = Font(italic=True, color="808080")
+
+    for col, width in zip('ABCDE', (22, 9, 15, 15, 17)):
+        ws.column_dimensions[col].width = width
+
+
+def _add_advances_sheet(wb, advances, start_date):
+    ws = wb.create_sheet("Avanslar")
+
+    ws.merge_cells('A1:E1')
+    title = ws['A1']
+    title.value = f"💸 Avanslar - {ui.fmt_month(start_date)}"
+    title.font = Font(bold=True, size=14, color="FFFFFF")
+    title.fill = PatternFill(start_color="203864", end_color="203864", fill_type="solid")
+    title.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 25
+
+    _header_row(ws, 3, {1: "Sana", 2: "Vaqt", 3: "Ism", 4: _money_header("Summa"), 5: "Izoh"}, 5)
+    row = 4
+    for advance in advances:
+        ws.cell(row=row, column=1).value = advance['date']
+        ws.cell(row=row, column=1).number_format = 'DD.MM.YYYY'
+        ws.cell(row=row, column=2).value = advance['created_at'].strftime('%H:%M')
+        ws.cell(row=row, column=3).value = advance['full_name']
+        ws.cell(row=row, column=4).value = advance['amount']
+        ws.cell(row=row, column=4).number_format = MONEY_FORMAT
+        ws.cell(row=row, column=5).value = advance['note'] or ""
+        ws.cell(row=row, column=5).alignment = Alignment(wrap_text=True, vertical="top")
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = BORDER
+        row += 1
+
+    ws.cell(row=row, column=3).value = "JAMI:"
+    ws.cell(row=row, column=4).value = sum(a['amount'] for a in advances)
+    ws.cell(row=row, column=4).number_format = MONEY_FORMAT
+    for col in (3, 4):
+        ws.cell(row=row, column=col).font = TOTAL_FONT
+
+    for col, width in zip('ABCDE', (12, 8, 22, 14, 45)):
+        ws.column_dimensions[col].width = width
 
 
 def create_monthly_report_excel(start_date, filename=None):
-    """Create beautiful monthly report with charts"""
+    """Monthly report: every day worked, then per employee what was earned,
+    taken as advances and is still to be paid, plus a sheet of the advances."""
     try:
-        rows = db.get_month_attendance_details(start_date)
-        if not rows:
+        payroll = analytics.month_payroll(start_date)
+        if not payroll['employees']:
             return None
+        rows = payroll['rows']
 
         wb = Workbook()
         ws = wb.active
@@ -39,7 +148,7 @@ def create_monthly_report_excel(start_date, filename=None):
         # Title
         ws.merge_cells('A1:G1')
         title = ws['A1']
-        title.value = f"📊 Oylik Hisobot - {start_date.strftime('%B %Y')}"
+        title.value = f"📊 Oylik Hisobot - {ui.fmt_month(start_date)}"
         title.font = Font(bold=True, size=14, color="FFFFFF")
         title.fill = PatternFill(start_color="203864", end_color="203864", fill_type="solid")
         title.alignment = Alignment(horizontal="center", vertical="center")
@@ -58,7 +167,6 @@ def create_monthly_report_excel(start_date, filename=None):
 
         # Data
         row_num = 4
-        employee_totals = {}
 
         for row in rows:
             rates = {
@@ -95,14 +203,8 @@ def create_monthly_report_excel(start_date, filename=None):
                 total = 0
                 tafsilot = "Not finished"
 
-            # Track totals by employee
-            emp_name = row['full_name']
-            if emp_name not in employee_totals:
-                employee_totals[emp_name] = 0
-            employee_totals[emp_name] += total
-
             # Row data
-            ws.cell(row=row_num, column=1).value = emp_name
+            ws.cell(row=row_num, column=1).value = row['full_name']
             ws.cell(row=row_num, column=2).value = row['date']
             ws.cell(row=row_num, column=3).value = check_in.strftime("%H:%M") if check_in else ""
             ws.cell(row=row_num, column=4).value = check_out.strftime("%H:%M") if check_out else ""
@@ -120,7 +222,7 @@ def create_monthly_report_excel(start_date, filename=None):
 
             row_num += 1
 
-        # Summary section
+        # Summary section: earned, advances, still to pay
         row_num += 1
         ws.merge_cells(f'A{row_num}:G{row_num}')
         summary_title = ws[f'A{row_num}']
@@ -130,19 +232,20 @@ def create_monthly_report_excel(start_date, filename=None):
         summary_title.alignment = Alignment(horizontal="center")
 
         row_num += 1
-        total_wage = sum(employee_totals.values())
-        for emp_name, wage in sorted(employee_totals.items(), key=lambda x: x[1], reverse=True):
-            ws.cell(row=row_num, column=1).value = emp_name
-            ws.cell(row=row_num, column=7).value = wage
-            ws.cell(row=row_num, column=7).number_format = MONEY_FORMAT
-            ws.cell(row=row_num, column=7).font = TOTAL_FONT
+        _header_row(ws, row_num, {1: "Ism", 2: "Kunlar", 5: _money_header("Ish haqi"),
+                                  6: _money_header("Avans"), 7: _money_header("To'lash kerak")}, 7)
+        row_num += 1
+        for emp in payroll['employees']:
+            _payroll_row(ws, row_num, emp['name'], emp['days'],
+                         {5: emp['wage'], 6: emp['advance'], 7: emp['to_pay']}, 7)
             row_num += 1
+        totals = payroll['totals']
+        _payroll_row(ws, row_num, "JAMI:", None,
+                     {5: totals['wage'], 6: totals['advance'], 7: totals['to_pay']}, 7, total=True)
 
-        ws.cell(row=row_num, column=1).value = "JAMI:"
-        ws.cell(row=row_num, column=7).value = total_wage
-        ws.cell(row=row_num, column=7).number_format = MONEY_FORMAT
-        ws.cell(row=row_num, column=7).font = TOTAL_FONT
-        ws.cell(row=row_num, column=7).fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+        _add_payment_sheet(wb, payroll, start_date)
+        if payroll['advances']:
+            _add_advances_sheet(wb, payroll['advances'], start_date)
 
         # Column widths
         ws.column_dimensions['A'].width = 20
@@ -154,7 +257,7 @@ def create_monthly_report_excel(start_date, filename=None):
         ws.column_dimensions['G'].width = 12
 
         # Create chart
-        if len(employee_totals) > 0:
+        if payroll['employees']:
             chart_sheet = wb.create_sheet("Chart")
 
             # Prepare data for chart
@@ -162,9 +265,9 @@ def create_monthly_report_excel(start_date, filename=None):
             chart_sheet['B1'].value = f"Jami ({utils.CURRENCY_LABEL})"
 
             row_num = 2
-            for emp_name, wage in sorted(employee_totals.items(), key=lambda x: x[1], reverse=True):
-                chart_sheet[f'A{row_num}'].value = emp_name
-                chart_sheet[f'B{row_num}'].value = wage
+            for emp in payroll['employees']:
+                chart_sheet[f'A{row_num}'].value = emp['name']
+                chart_sheet[f'B{row_num}'].value = emp['wage']
                 row_num += 1
 
             # Create chart

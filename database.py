@@ -519,11 +519,15 @@ def get_month_attendance_all(start_date):
         return []
 
 
-def get_month_attendance_details(start_date):
+def get_month_attendance_details(start_date, end_date=None):
+    """Rows with start_date <= date, and date < end_date when one is given.
+
+    A month report must pass its end: without it, August viewed in October
+    also counted September and October."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute('''
+        sql = '''
             SELECT u.full_name, a.date, a.check_in, a.check_out, a.total_wage,
                    a.base_wage, a.overtime_wage,
                    r.salary_type, r.rate_n, r.rate_m, r.rate_k, r.rate_overtime,
@@ -533,8 +537,13 @@ def get_month_attendance_details(start_date):
             JOIN users u ON a.user_id = u.id
             LEFT JOIN rates r ON u.id = r.user_id
             WHERE a.date >= ?
-            ORDER BY u.full_name, a.date
-        ''', (start_date,))
+        '''
+        params = [start_date]
+        if end_date is not None:
+            sql += 'AND a.date < ? '
+            params.append(end_date)
+        sql += 'ORDER BY u.full_name, a.date'
+        c.execute(sql, params)
         rows = c.fetchall()
         conn.close()
         return rows

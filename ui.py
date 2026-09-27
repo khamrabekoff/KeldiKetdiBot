@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 
+import analytics
 import database as db
 import messages as msg
 import utils
@@ -96,15 +97,10 @@ def esc(text):
     return html.escape(text or '', quote=False)
 
 
-def next_month(day):
-    """First day of the month after `day`'s - the exclusive end of its month."""
-    return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-
 def month_advances(user_id, day):
     """Active advances of one employee in the month containing `day`."""
     start = day.replace(day=1)
-    return db.get_advances(start, next_month(start), user_id)
+    return db.get_advances(start, utils.next_month(start), user_id)
 
 
 def advance_lines(advances, limit=10):
@@ -599,74 +595,50 @@ def employee_analytics_card(stats):
 
 
 def admin_month_report_card(start_date):
-    """Per-employee monthly totals with a grand total."""
-    rows = db.get_month_attendance_details(start_date)
-    advances = db.get_advances(start_date, next_month(start_date))
-    if not rows and not advances:
+    """Per-employee monthly totals, advances, and what the admin still has to
+    pay - per person and in total."""
+    payroll = analytics.month_payroll(start_date)
+    if not payroll['employees']:
         return f"📊 <b>{fmt_month(start_date)}</b>\n\n<i>Bu oyda ma'lumot yo'q.</i>"
-
-    def empty_bucket():
-        return {'wage': 0.0, 'days': 0, 'mins': 0.0, 'base': 0.0, 'overtime': 0.0, 'advance': 0.0}
-
-    per_employee = {}
-    for a in advances:
-        per_employee.setdefault(a['full_name'], empty_bucket())['advance'] += a['amount']
-    for r in rows:
-        name = r['full_name']
-        bucket = per_employee.setdefault(name, empty_bucket())
-        if r['check_in'] and r['check_out']:
-            bucket['days'] += 1
-            bucket['wage'] += r['total_wage'] or 0
-            base, overtime = wage_parts(r)
-            bucket['base'] += base
-            bucket['overtime'] += overtime
-            bucket['mins'] += worked_minutes(r['check_in'], r['check_out'])
 
     text = (
         f"📊 <b>OYLIK HISOBOT</b>\n"
         f"<i>{fmt_month(start_date)}</i>\n"
         f"{'━' * 18}\n\n"
     )
-    grand = 0.0
-    grand_overtime = 0.0
-    grand_advance = 0.0
-    for name, b in sorted(per_employee.items(), key=lambda kv: -kv[1]['wage']):
-        grand += b['wage']
-        grand_overtime += b['overtime']
-        grand_advance += b['advance']
+    for p in payroll['employees']:
         text += (
-            f"👤 <b>{name}</b>\n"
-            f"<code>  {b['days']} kun · {fmt_duration(b['mins'])}</code>\n"
+            f"👤 <b>{p['name']}</b>\n"
+            f"<code>  {p['days']} kun · {fmt_duration(p['minutes'])}</code>\n"
         )
-        if b['overtime']:
+        if p['overtime']:
             text += (
-                f"<code>  {fmt_money(b['base'], unit=False)} + {fmt_money(b['overtime'], unit=False)} qo'shimcha</code>\n"
-                f"<code>  = {fmt_money(b['wage'])}</code>\n"
+                f"<code>  {fmt_money(p['base'], unit=False)} + {fmt_money(p['overtime'], unit=False)} qo'shimcha</code>\n"
+                f"<code>  = {fmt_money(p['wage'])}</code>\n"
             )
         else:
-            text += f"<code>  {fmt_money(b['wage'])}</code>\n"
-        if b['advance']:
+            text += f"<code>  {fmt_money(p['wage'])}</code>\n"
+        if p['advance']:
             text += (
-                f"<code>  − {fmt_money(b['advance'], unit=False)} avans</code>\n"
-                f"<code>  = {fmt_money(b['wage'] - b['advance'])} qoldiq</code>\n"
+                f"<code>  − {fmt_money(p['advance'], unit=False)} avans</code>\n"
+                f"<code>  = {fmt_money(p['to_pay'])} to'lash kerak</code>\n"
             )
         text += "\n"
 
+    totals = payroll['totals']
     text += f"{'━' * 18}\n"
-    if grand_overtime:
-        text += f"⭐ <b>Qo'shimcha: {fmt_money(grand_overtime)}</b>\n"
-    text += f"💵 <b>JAMI: {fmt_money(grand)}</b>"
-    if grand_advance:
-        text += (
-            f"\n💸 <b>Avans: {fmt_money(grand_advance)}</b>"
-            f"\n✅ <b>Qoldiq: {fmt_money(grand - grand_advance)}</b>"
-        )
+    if totals['overtime']:
+        text += f"⭐ <b>Qo'shimcha: {fmt_money(totals['overtime'])}</b>\n"
+    text += f"💵 <b>JAMI: {fmt_money(totals['wage'])}</b>"
+    if totals['advance']:
+        text += f"\n💸 <b>Avans: {fmt_money(totals['advance'])}</b>"
+    text += f"\n💰 <b>TO'LASH KERAK: {fmt_money(totals['to_pay'])}</b>"
     return text
 
 
 # ==================== ADVANCES ====================
 # An employee records cash taken before payday; admins are told at once and
-# can void a mistaken entry. Reports take it off the month's pay as 'qoldiq'.
+# can void a mistaken entry. Reports take it off the month's pay.
 
 BTN_ADVANCE_SKIP_NOTE = "⏭ Izohsiz"
 BTN_ADVANCE_CONFIRM = "✅ Tasdiqlash"
