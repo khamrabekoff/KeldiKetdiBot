@@ -1,3 +1,5 @@
+import re
+
 import pytz
 from datetime import datetime, time
 
@@ -22,9 +24,35 @@ def format_money(amount, unit=True):
     unit=False drops the currency for the fixed-width <code> columns, where
     the extra characters wrap the line on a phone and the column header
     carries the unit instead.
+
+    A negative amount (an advance larger than the pay earned so far) puts the
+    minus ahead of the unit: '-$50.00', not '$-50.00'.
     """
-    grouped = f"{amount or 0:,.{CURRENCY_DECIMALS}f}".replace(',', CURRENCY_GROUP)
-    return f"{CURRENCY_PREFIX}{grouped}{CURRENCY_SUFFIX}" if unit else grouped
+    value = round(amount or 0, CURRENCY_DECIMALS)
+    sign = '-' if value < 0 else ''
+    grouped = f"{abs(value):,.{CURRENCY_DECIMALS}f}".replace(',', CURRENCY_GROUP)
+    return f"{sign}{CURRENCY_PREFIX}{grouped}{CURRENCY_SUFFIX}" if unit else f"{sign}{grouped}"
+
+
+def parse_amount(text):
+    """A sum of money as someone types it into Telegram, or None.
+
+    Accepts '300', '$300', '300 $', '1 500', '1,500' and '12.5' / '12,5'.
+    A comma followed by exactly three digits is a thousands separator,
+    otherwise it is a decimal point. Zero and negatives are rejected.
+    """
+    cleaned = (text or '').replace('$', '').replace(' ', '').replace(' ', '')
+    if re.fullmatch(r'\d{1,3}(,\d{3})+(\.\d+)?', cleaned):
+        cleaned = cleaned.replace(',', '')
+    else:
+        cleaned = cleaned.replace(',', '.')
+    try:
+        value = round(float(cleaned), CURRENCY_DECIMALS)
+    except ValueError:
+        return None
+    if not value > 0 or value == float('inf'):
+        return None
+    return value
 
 
 def format_rate(value):

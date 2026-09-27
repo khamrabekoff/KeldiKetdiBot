@@ -17,6 +17,7 @@ ACTION_TYPES = {
     'admin_promoted': 'Назначен администратором',
     'broadcast_sent': 'Отправлено массовое сообщение',
     'report_generated': 'Создан отчет',
+    'advance_voided': 'Аванс отменён',
 }
 
 

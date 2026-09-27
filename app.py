@@ -214,6 +214,7 @@ ACTION_MENU, EDIT_ATT_DATE, EDIT_ATT_IN, EDIT_ATT_OUT = range(18, 22)
 COR_REQ_DATE, COR_REQ_IN, COR_REQ_OUT, COR_REQ_CONFIRM = range(22, 26)
 SET_TIME_VALUE = 26
 HOLIDAY_ADD = 27
+ADV_AMOUNT, ADV_NOTE, ADV_CONFIRM = range(28, 31)
 
 telegram_app = None
 
@@ -1560,6 +1561,141 @@ async def reject_request_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Failed to send rejection message: {e}")
 
 
+# ==================== ADVANCES ====================
+# Cash an employee takes before payday. They record it themselves; every admin
+# is told at once and can void an entry that is wrong.
+
+async def advance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user(update.effective_user.id)
+    if not user or user['role'] != 'employee':
+        return ConversationHandler.END
+    context.user_data.pop('advance', None)
+    await update.message.reply_text(
+        ui.advance_amount_prompt(user['id']),
+        reply_markup=ui.advance_back_keyboard(),
+        parse_mode='HTML',
+    )
+    return ADV_AMOUNT
+
+
+async def advance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == msg.BTN_BACK:
+        return await advance_cancel(update, context)
+    amount = utils.parse_amount(text)
+    if amount is None:
+        await update.message.reply_text(ui.ADVANCE_BAD_AMOUNT, parse_mode='HTML')
+        return ADV_AMOUNT
+    context.user_data['advance'] = {'amount': amount}
+    await update.message.reply_text(
+        ui.ADVANCE_NOTE_PROMPT, reply_markup=ui.advance_note_keyboard(), parse_mode='HTML'
+    )
+    return ADV_NOTE
+
+
+async def advance_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == msg.BTN_BACK:
+        return await advance_cancel(update, context)
+    draft = context.user_data.get('advance')
+    if not draft:
+        return ConversationHandler.END
+    draft['note'] = None if text == ui.BTN_ADVANCE_SKIP_NOTE else text[:ui.ADVANCE_NOTE_LIMIT]
+    await update.message.reply_text(
+        ui.advance_confirm_text(draft['amount'], draft['note']),
+        reply_markup=ui.advance_confirm_keyboard(),
+        parse_mode='HTML',
+    )
+    return ADV_CONFIRM
+
+
+async def advance_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == msg.BTN_BACK:
+        return await advance_cancel(update, context)
+    if text != ui.BTN_ADVANCE_CONFIRM:
+        await update.message.reply_text("Iltimos, pastdagi tugmalardan birini tanlang.")
+        return ADV_CONFIRM
+    draft = context.user_data.pop('advance', None)
+    if not draft:
+        return ConversationHandler.END
+
+    user_id = update.effective_user.id
+    advance_id = db.add_advance(user_id, draft['amount'], draft['note'], utils.get_now())
+    # Admins first: the record is already saved, and if the employee's own
+    # reply is the call the proxy drops, the admins must still have heard.
+    await _notify_admins_of_advance(advance_id)
+    user = db.get_user(user_id)
+    await send_employee_home(update, user, note=ui.advance_saved_note(draft['amount']))
+    return ConversationHandler.END
+
+
+async def advance_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('advance', None)
+    user = db.get_user(update.effective_user.id)
+    if user:
+        await send_employee_home(update, user, note="<i>Bekor qilindi.</i>")
+    return ConversationHandler.END
+
+
+async def _notify_admins_of_advance(advance_id):
+    advance = db.get_advance(advance_id)
+    if not advance:
+        return
+    text = ui.advance_admin_card(advance)
+    keyboard = ui.advance_void_keyboard(advance_id)
+    conn = db.get_connection()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE role='admin'")
+    admins = c.fetchall()
+    conn.close()
+    for admin in admins:
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=admin['id'], text=text, reply_markup=keyboard, parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send advance {advance_id} to admin {admin['id']}: {e}")
+
+
+async def advance_void_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """An admin voids an advance. Every admin got the same button, so the
+    second press finds it already voided and just redraws the message."""
+    query = update.callback_query
+    if not await check_admin(query.from_user.id):
+        await _answer_quietly(query)
+        return
+    advance_id = int(query.data.split(':')[2])
+    advance = db.get_advance(advance_id)
+    if not advance:
+        await _answer_quietly(query, "Topilmadi")
+        return
+
+    if db.void_advance(advance_id, query.from_user.id):
+        audit.log_employee_action(
+            query.from_user.id, advance['user_id'], 'advance_voided',
+            f"Avans bekor qilindi: {ui.fmt_money(advance['amount'])}",
+            f"{advance['date'].isoformat()} (ID {advance_id})"
+        )
+        await _answer_quietly(query, "Bekor qilindi")
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=advance['user_id'], text=ui.advance_voided_text(advance), parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Failed to tell employee about voided advance {advance_id}: {e}")
+    else:
+        await _answer_quietly(query, "Allaqachon bekor qilingan")
+
+    try:
+        await query.edit_message_text(
+            ui.advance_admin_card(db.get_advance(advance_id)), parse_mode='HTML'
+        )
+    except BadRequest as e:
+        if 'not modified' not in str(e).lower():
+            raise
+
+
 # ==================== HANDLE TEXT ====================
 
 async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2078,6 +2214,24 @@ def create_application():
         )
         app_config.add_handler(correction_conv)
 
+        # Advance Conversation (employee records cash taken before payday)
+        advance_back = MessageHandler(filters.Regex(f"^{re.escape(msg.BTN_BACK)}$"), advance_cancel)
+        advance_conv = ConversationHandler(
+            entry_points=[MessageHandler(
+                filters.Regex(f"^{re.escape(ui.BTN_ADVANCE)}$"), advance_start
+            )],
+            states={
+                ADV_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_amount)],
+                ADV_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_note)],
+                ADV_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_confirm)],
+            },
+            fallbacks=[CommandHandler("cancel", advance_cancel), advance_back],
+            name="advance_conv",
+            persistent=False,
+            allow_reentry=True,
+        )
+        app_config.add_handler(advance_conv)
+
         # Settings Conversation (edit a work-hour value)
         settings_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(settings_pick_callback, pattern="^set:")],
@@ -2108,6 +2262,7 @@ def create_application():
         app_config.add_handler(CallbackQueryHandler(holidays_month_callback, pattern="^hol:m:"))
         app_config.add_handler(CallbackQueryHandler(holidays_delete_callback, pattern="^hol:del:"))
         app_config.add_handler(CallbackQueryHandler(pending_delete_callback, pattern="^pdel:"))
+        app_config.add_handler(CallbackQueryHandler(advance_void_callback, pattern="^adv:void:"))
 
         # Manage Employee Conversation (edit rates / attendance / delete)
         manage_emp_handler = ConversationHandler(

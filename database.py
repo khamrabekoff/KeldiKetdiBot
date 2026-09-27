@@ -110,8 +110,26 @@ def init_db():
             )
         ''')
 
+        # Cash an employee took ahead of payday. Entered by the employee, and
+        # voided rather than deleted when an admin rejects it, so a mistaken
+        # entry still leaves a trace of who removed it.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS advances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                note TEXT,
+                date DATE,
+                created_at TIMESTAMP,
+                status TEXT DEFAULT 'ACTIVE',
+                voided_by INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance(user_id, date)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_advances_user_date ON advances(user_id, date)')
 
         new_cols = [
             ("rates", "salary_type", "TEXT DEFAULT 'tariff'"),
@@ -741,6 +759,87 @@ def get_pending_correction_requests():
         return rows
     except Exception as e:
         logger.error(f"Error getting pending correction requests: {e}")
+        return []
+
+
+# ==================== ADVANCES ====================
+# Cash taken before payday. Only ACTIVE rows count towards anything; a voided
+# one stays in the table as a record of the mistake.
+
+def add_advance(user_id, amount, note, created_at):
+    """created_at is Tashkent time; its date decides which month the advance
+    comes out of."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO advances (user_id, amount, note, date, created_at) VALUES (?, ?, ?, ?, ?)',
+            (user_id, amount, note, created_at.date(), created_at)
+        )
+        advance_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return advance_id
+    except Exception as e:
+        logger.error(f"Error adding advance for user {user_id}: {e}")
+        raise
+
+
+def get_advance(advance_id):
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT a.*, u.full_name
+            FROM advances a
+            LEFT JOIN users u ON a.user_id = u.id
+            WHERE a.id = ?
+        ''', (advance_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        logger.error(f"Error getting advance {advance_id}: {e}")
+        return None
+
+
+def void_advance(advance_id, admin_id):
+    """Returns False if it was already voided (or never existed), so a second
+    admin pressing the same button doesn't void it twice."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("UPDATE advances SET status = 'VOID', voided_by = ? WHERE id = ? AND status = 'ACTIVE'",
+                  (admin_id, advance_id))
+        voided = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return voided
+    except Exception as e:
+        logger.error(f"Error voiding advance {advance_id}: {e}")
+        raise
+
+
+def get_advances(start_date, end_date, user_id=None):
+    """Active advances with start_date <= date < end_date, oldest first."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        sql = '''SELECT a.id, a.user_id, a.amount, a.note, a.date, a.created_at, u.full_name
+                 FROM advances a
+                 JOIN users u ON a.user_id = u.id
+                 WHERE a.status = 'ACTIVE' AND a.date >= ? AND a.date < ? '''
+        params = [start_date, end_date]
+        if user_id is not None:
+            sql += 'AND a.user_id = ? '
+            params.append(user_id)
+        sql += 'ORDER BY a.created_at'
+        c.execute(sql, params)
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting advances: {e}")
         return []
 
 

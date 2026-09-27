@@ -4,11 +4,13 @@ Kept separate from handler logic so the wording/layout of every screen lives
 in one place. All user-facing text is Uzbek.
 """
 import calendar
+import html
 from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 import database as db
+import messages as msg
 import utils
 import workdays
 
@@ -88,6 +90,35 @@ def worked_minutes(check_in, check_out):
     return (check_out - check_in).total_seconds() / 60.0
 
 
+def esc(text):
+    """Typed-in text goes into HTML messages; a stray '<' would otherwise
+    make Telegram reject the whole message."""
+    return html.escape(text or '', quote=False)
+
+
+def next_month(day):
+    """First day of the month after `day`'s - the exclusive end of its month."""
+    return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def month_advances(user_id, day):
+    """Active advances of one employee in the month containing `day`."""
+    start = day.replace(day=1)
+    return db.get_advances(start, next_month(start), user_id)
+
+
+def advance_lines(advances, limit=10):
+    """'20.09      300.00 note' per advance, newest last."""
+    lines = ""
+    hidden = len(advances) - limit
+    if hidden > 0:
+        lines += f"<i>… yana {hidden} ta</i>\n"
+    for a in advances[-limit:]:
+        note = f" <i>{esc(a['note'])}</i>" if a['note'] else ""
+        lines += f"<code>{a['date'].strftime('%d.%m')}  {fmt_money(a['amount'], unit=False):>10}</code>{note}\n"
+    return lines
+
+
 # ==================== EMPLOYEE CARDS ====================
 
 # Employee bottom-keyboard labels. Kept as constants because handlers match on
@@ -97,6 +128,7 @@ BTN_CHECK_OUT = "🚪 KETDIM"
 BTN_STATUS = "🏠 Holat"
 BTN_MY_STATS = "📊 Hisobim"
 BTN_CORRECTION = "📝 Tuzatish"
+BTN_ADVANCE = "💸 Avans"
 
 
 def employee_keyboard(user_id):
@@ -107,7 +139,7 @@ def employee_keyboard(user_id):
         [
             [primary],
             [BTN_STATUS, BTN_MY_STATS],
-            [BTN_CORRECTION],
+            [BTN_CORRECTION, BTN_ADVANCE],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
@@ -213,6 +245,15 @@ def employee_stats_card(user_id):
     elif show_earnings:
         text += f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
 
+    # The employee typed these in themselves, so they see them even where pay
+    # is hidden - only the balance, which would reveal the pay, is left out.
+    advances = month_advances(user_id, start)
+    if advances:
+        advance_total = sum(a['amount'] for a in advances)
+        text += f"💸 Avans: <b>{fmt_money(advance_total)}</b>\n"
+        if show_earnings:
+            text += f"💵 Qoldiq: <b>{fmt_money(total_wage - advance_total)}</b>\n"
+
     recent = [r for r in rows if r['check_in']][-7:]
     if recent:
         text += f"\n{'━' * 18}\n<b>So'nggi kunlar</b>\n"
@@ -224,6 +265,9 @@ def employee_stats_card(user_id):
             text += f"<code>{r['date'].strftime('%d.%m')}  {ci}-{co}{tail}</code>\n"
     else:
         text += "\n<i>Bu oyda hali ma'lumot yo'q.</i>"
+
+    if advances:
+        text += f"\n{'━' * 18}\n<b>Avanslar</b>\n" + advance_lines(advances)
 
     return text
 
@@ -469,6 +513,15 @@ def admin_employee_card(emp_id):
             f"<code>Jami:    {fmt_money(total_wage)}</code>"
         )
 
+    advances = month_advances(emp_id, now.date())
+    if advances:
+        advance_total = sum(a['amount'] for a in advances)
+        money_lines += (
+            f"\n<code>Avans:   {fmt_money(advance_total)}</code>"
+            f"\n<code>Qoldiq:  {fmt_money(total_wage - advance_total)}</code>"
+            f"\n\n💸 <b>Avanslar</b>\n" + advance_lines(advances).rstrip('\n')
+        )
+
     return (
         f"👤 <b>{emp['full_name'].upper()}</b>\n"
         f"{'━' * 18}\n\n"
@@ -548,15 +601,19 @@ def employee_analytics_card(stats):
 def admin_month_report_card(start_date):
     """Per-employee monthly totals with a grand total."""
     rows = db.get_month_attendance_details(start_date)
-    if not rows:
+    advances = db.get_advances(start_date, next_month(start_date))
+    if not rows and not advances:
         return f"📊 <b>{fmt_month(start_date)}</b>\n\n<i>Bu oyda ma'lumot yo'q.</i>"
 
+    def empty_bucket():
+        return {'wage': 0.0, 'days': 0, 'mins': 0.0, 'base': 0.0, 'overtime': 0.0, 'advance': 0.0}
+
     per_employee = {}
+    for a in advances:
+        per_employee.setdefault(a['full_name'], empty_bucket())['advance'] += a['amount']
     for r in rows:
         name = r['full_name']
-        bucket = per_employee.setdefault(
-            name, {'wage': 0.0, 'days': 0, 'mins': 0.0, 'base': 0.0, 'overtime': 0.0}
-        )
+        bucket = per_employee.setdefault(name, empty_bucket())
         if r['check_in'] and r['check_out']:
             bucket['days'] += 1
             bucket['wage'] += r['total_wage'] or 0
@@ -572,9 +629,11 @@ def admin_month_report_card(start_date):
     )
     grand = 0.0
     grand_overtime = 0.0
+    grand_advance = 0.0
     for name, b in sorted(per_employee.items(), key=lambda kv: -kv[1]['wage']):
         grand += b['wage']
         grand_overtime += b['overtime']
+        grand_advance += b['advance']
         text += (
             f"👤 <b>{name}</b>\n"
             f"<code>  {b['days']} kun · {fmt_duration(b['mins'])}</code>\n"
@@ -582,13 +641,118 @@ def admin_month_report_card(start_date):
         if b['overtime']:
             text += (
                 f"<code>  {fmt_money(b['base'], unit=False)} + {fmt_money(b['overtime'], unit=False)} qo'shimcha</code>\n"
-                f"<code>  = {fmt_money(b['wage'])}</code>\n\n"
+                f"<code>  = {fmt_money(b['wage'])}</code>\n"
             )
         else:
-            text += f"<code>  {fmt_money(b['wage'])}</code>\n\n"
+            text += f"<code>  {fmt_money(b['wage'])}</code>\n"
+        if b['advance']:
+            text += (
+                f"<code>  − {fmt_money(b['advance'], unit=False)} avans</code>\n"
+                f"<code>  = {fmt_money(b['wage'] - b['advance'])} qoldiq</code>\n"
+            )
+        text += "\n"
 
     text += f"{'━' * 18}\n"
     if grand_overtime:
         text += f"⭐ <b>Qo'shimcha: {fmt_money(grand_overtime)}</b>\n"
     text += f"💵 <b>JAMI: {fmt_money(grand)}</b>"
+    if grand_advance:
+        text += (
+            f"\n💸 <b>Avans: {fmt_money(grand_advance)}</b>"
+            f"\n✅ <b>Qoldiq: {fmt_money(grand - grand_advance)}</b>"
+        )
     return text
+
+
+# ==================== ADVANCES ====================
+# An employee records cash taken before payday; admins are told at once and
+# can void a mistaken entry. Reports take it off the month's pay as 'qoldiq'.
+
+BTN_ADVANCE_SKIP_NOTE = "⏭ Izohsiz"
+BTN_ADVANCE_CONFIRM = "✅ Tasdiqlash"
+ADVANCE_NOTE_LIMIT = 200
+
+ADVANCE_NOTE_PROMPT = (
+    "📝 Izoh yozing: nima uchun olindi?\n"
+    "<i>Majburiy emas — izohsiz davom etish uchun «⏭ Izohsiz» tugmasini bosing.</i>"
+)
+ADVANCE_BAD_AMOUNT = "❌ Summani raqam bilan yozing. Masalan: <code>300</code>"
+
+
+def advance_amount_prompt(user_id):
+    text = (
+        "💸 <b>AVANS</b>\n"
+        f"{'━' * 18}\n\n"
+        "Qancha pul oldingiz? Summani yozing.\n"
+        "<i>Masalan: 300</i>"
+    )
+    taken = month_advances(user_id, utils.get_now().date())
+    if taken:
+        text += (
+            f"\n\n<i>Bu oy olingan: {fmt_money(sum(a['amount'] for a in taken))} "
+            f"({len(taken)} marta)</i>"
+        )
+    return text
+
+
+def advance_back_keyboard():
+    return ReplyKeyboardMarkup([[msg.BTN_BACK]], resize_keyboard=True)
+
+
+def advance_note_keyboard():
+    return ReplyKeyboardMarkup([[BTN_ADVANCE_SKIP_NOTE], [msg.BTN_BACK]], resize_keyboard=True)
+
+
+def advance_confirm_keyboard():
+    return ReplyKeyboardMarkup([[msg.BTN_BACK, BTN_ADVANCE_CONFIRM]], resize_keyboard=True)
+
+
+def advance_confirm_text(amount, note):
+    text = (
+        "Tasdiqlaysizmi?\n\n"
+        f"💰 Summa: <b>{fmt_money(amount)}</b>\n"
+        f"📅 Sana: <b>{fmt_date(utils.get_now())}</b>\n"
+    )
+    if note:
+        text += f"📝 Izoh: <i>{esc(note)}</i>\n"
+    return text
+
+
+def advance_saved_note(amount):
+    return f"✅ <b>Avans qayd etildi: {fmt_money(amount)}</b>\n<i>Admin xabardor qilindi.</i>"
+
+
+def advance_admin_card(advance):
+    """What admins get the moment an employee records an advance, and what
+    that message becomes once one of them voids it."""
+    created = advance['created_at']
+    month_total = sum(a['amount'] for a in month_advances(advance['user_id'], advance['date']))
+    text = (
+        "💸 <b>AVANS OLINDI</b>\n"
+        f"{'━' * 18}\n\n"
+        f"👤 Xodim: <b>{esc(advance['full_name'] or '?')}</b>\n"
+        f"💰 Summa: <b>{fmt_money(advance['amount'])}</b>\n"
+        f"📅 {fmt_date(created)} · {created.strftime('%H:%M')}\n"
+    )
+    if advance['note']:
+        text += f"📝 Izoh: <i>{esc(advance['note'])}</i>\n"
+    text += f"\n<i>{fmt_month(created)} jami avans: {fmt_money(month_total)}</i>"
+    if advance['status'] != 'ACTIVE':
+        text += "\n\n❌ <b>Bekor qilingan</b>"
+    return text
+
+
+def advance_void_keyboard(advance_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Bekor qilish", callback_data=f"adv:void:{advance_id}")
+    ]])
+
+
+def advance_voided_text(advance):
+    """To the employee, once an admin has voided their entry."""
+    d = advance['date']
+    return (
+        f"❌ {d.day}-{MONTHS_UZ[d.month - 1]}dagi {fmt_money(advance['amount'])} "
+        f"avansingiz admin tomonidan bekor qilindi.\n"
+        f"<i>Xato bo'lsa, admin bilan gaplashing.</i>"
+    )
