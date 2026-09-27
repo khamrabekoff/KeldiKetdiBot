@@ -64,13 +64,35 @@ def _payroll_row(ws, row, name, days, money, width, total=False):
         ws.cell(row=row, column=pay_col).fill = PAY_FILL
 
 
+def _payroll_table(ws, row, payroll, first_money_col, width, total_label):
+    """Header, one row per employee and a JAMI row: name, days, then the money
+    columns this month needs. Returns the row after the table."""
+    columns = analytics.payroll_columns(payroll)
+    money_cols = {first_money_col + i: key for i, (_, key) in enumerate(columns)}
+    labels = {1: "Ism", 2: "Kunlar"}
+    labels.update({first_money_col + i: _money_header(label) for i, (label, _) in enumerate(columns)})
+    _header_row(ws, row, labels, width)
+    row += 1
+    for emp in payroll['employees']:
+        _payroll_row(ws, row, emp['name'], emp['days'],
+                     {col: emp[key] for col, key in money_cols.items()}, width)
+        row += 1
+    totals = payroll['totals']
+    _payroll_row(ws, row, total_label, None,
+                 {col: totals[key] for col, key in money_cols.items()}, width, total=True)
+    return row + 1
+
+
 def _add_payment_sheet(wb, payroll, start_date):
     """The answer to 'how much do I still owe everyone', on the sheet the file
     opens to, rather than below a hundred rows of days."""
     ws = wb.create_sheet("To'lov", 0)
     wb.active = 0
+    columns = analytics.payroll_columns(payroll)
+    width = 2 + len(columns)
+    last = chr(ord('A') + width - 1)
 
-    ws.merge_cells('A1:E1')
+    ws.merge_cells(f'A1:{last}1')
     title = ws['A1']
     title.value = f"💰 To'lov - {ui.fmt_month(start_date)}"
     title.font = Font(bold=True, size=14, color="FFFFFF")
@@ -78,22 +100,15 @@ def _add_payment_sheet(wb, payroll, start_date):
     title.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 25
 
-    _header_row(ws, 3, {1: "Ism", 2: "Kunlar", 3: _money_header("Ish haqi"),
-                        4: _money_header("Avans"), 5: _money_header("To'lash kerak")}, 5)
-    row = 4
-    for emp in payroll['employees']:
-        _payroll_row(ws, row, emp['name'], emp['days'],
-                     {3: emp['wage'], 4: emp['advance'], 5: emp['to_pay']}, 5)
-        row += 1
-    totals = payroll['totals']
-    _payroll_row(ws, row, "JAMI", None,
-                 {3: totals['wage'], 4: totals['advance'], 5: totals['to_pay']}, 5, total=True)
+    row = _payroll_table(ws, 3, payroll, first_money_col=3, width=width, total_label="JAMI")
 
-    ws.cell(row=row + 2, column=1).value = "To'lash kerak = Ish haqi − Avans"
-    ws.cell(row=row + 2, column=1).font = Font(italic=True, color="808080")
+    ws.cell(row=row + 1, column=1).value = analytics.payroll_formula(columns)
+    ws.cell(row=row + 1, column=1).font = Font(italic=True, color="808080")
 
-    for col, width in zip('ABCDE', (22, 9, 15, 15, 17)):
-        ws.column_dimensions[col].width = width
+    ws.column_dimensions['A'].width = 22
+    ws.column_dimensions['B'].width = 9
+    for i in range(len(columns)):
+        ws.column_dimensions[chr(ord('C') + i)].width = 17
 
 
 def _add_advances_sheet(wb, advances, start_date):
@@ -231,17 +246,9 @@ def create_monthly_report_excel(start_date, filename=None):
         summary_title.fill = TOTAL_FILL
         summary_title.alignment = Alignment(horizontal="center")
 
-        row_num += 1
-        _header_row(ws, row_num, {1: "Ism", 2: "Kunlar", 5: _money_header("Ish haqi"),
-                                  6: _money_header("Avans"), 7: _money_header("To'lash kerak")}, 7)
-        row_num += 1
-        for emp in payroll['employees']:
-            _payroll_row(ws, row_num, emp['name'], emp['days'],
-                         {5: emp['wage'], 6: emp['advance'], 7: emp['to_pay']}, 7)
-            row_num += 1
-        totals = payroll['totals']
-        _payroll_row(ws, row_num, "JAMI:", None,
-                     {5: totals['wage'], 6: totals['advance'], 7: totals['to_pay']}, 7, total=True)
+        # Money columns end at G, the day table's money column
+        _payroll_table(ws, row_num + 1, payroll, first_money_col=8 - len(analytics.payroll_columns(payroll)),
+                       width=7, total_label="JAMI:")
 
         _add_payment_sheet(wb, payroll, start_date)
         if payroll['advances']:

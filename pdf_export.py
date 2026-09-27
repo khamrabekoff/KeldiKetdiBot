@@ -69,18 +69,22 @@ def _bold_rows(indexes, bold_font):
 
 
 def _payment_table(payroll, regular, bold_font):
-    """Per employee: earned, advances, and what the admin still has to pay."""
+    """Per employee: earned, advances (and carry and payments once months are
+    settled in the bot), and what the admin still has to pay."""
+    columns = analytics.payroll_columns(payroll)
+    header_style = ParagraphStyle('PayHeader', fontName=bold_font, fontSize=9, leading=11,
+                                  textColor=colors.whitesmoke, alignment=1)
     unit = f" ({utils.CURRENCY_LABEL})"
-    data = [['Ism', 'Kunlar', 'Ish haqi' + unit, 'Avans' + unit, "To'lash kerak" + unit]]
+    data = [['Ism', 'Kunlar'] + [Paragraph(label + unit, header_style) for label, _ in columns]]
     for emp in payroll['employees']:
-        data.append([emp['name'], str(emp['days']), _money(emp['wage']),
-                     _money(emp['advance']), _money(emp['to_pay'])])
+        data.append([emp['name'], str(emp['days'])] + [_money(emp[key]) for _, key in columns])
     totals = payroll['totals']
-    data.append(['JAMI', '', _money(totals['wage']), _money(totals['advance']),
-                 _money(totals['to_pay'])])
+    data.append(['JAMI', ''] + [_money(totals[key]) for _, key in columns])
 
-    table = Table(data, colWidths=[1.6*inch, 0.7*inch, 1.1*inch, 1.0*inch, 1.45*inch])
+    money_width = min(1.35, 4.1 / len(columns))
+    table = Table(data, colWidths=[1.5*inch, 0.6*inch] + [money_width*inch] * len(columns))
     table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
         ('FONTNAME', (0, 0), (-1, -1), regular),
         ('FONTNAME', (0, 0), (-1, 0), bold_font),
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#203864')),
@@ -216,7 +220,7 @@ def create_monthly_pdf_report(start_date):
         hint_style = ParagraphStyle('Hint', parent=styles['Normal'], fontName=regular,
                                     fontSize=9, textColor=colors.grey)
         elements.append(Spacer(1, 0.05*inch))
-        elements.append(Paragraph("To'lash kerak = Ish haqi - Avans", hint_style))
+        elements.append(Paragraph(analytics.payroll_formula(analytics.payroll_columns(payroll)), hint_style))
         elements.append(Spacer(1, 0.3*inch))
 
         if payroll['advances']:

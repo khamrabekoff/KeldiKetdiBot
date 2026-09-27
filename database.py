@@ -127,9 +127,28 @@ def init_db():
             )
         ''')
 
+        # Salary the admin has paid out for a month. A month with at least one
+        # row here counts as settled, and whatever is left of its balance -
+        # an advance larger than the pay, or a partial payment - moves into
+        # the next month. A zero-amount row settles a month without paying.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                month DATE,
+                amount REAL,
+                created_at TIMESTAMP,
+                created_by INTEGER,
+                status TEXT DEFAULT 'ACTIVE',
+                voided_by INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance(user_id, date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_advances_user_date ON advances(user_id, date)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_payments_month_user ON payments(month, user_id)')
 
         new_cols = [
             ("rates", "salary_type", "TEXT DEFAULT 'tariff'"),
@@ -145,6 +164,7 @@ def init_db():
             ("attendance", "base_wage", "REAL DEFAULT 0"),
             ("attendance", "overtime_wage", "REAL DEFAULT 0"),
             ("pending_users", "overtime_per_minute", "REAL DEFAULT 0"),
+            ("advances", "created_by", "INTEGER"),  # admin who entered it; NULL = the employee
         ]
         for table, col, col_def in new_cols:
             try:
@@ -528,7 +548,7 @@ def get_month_attendance_details(start_date, end_date=None):
         conn = get_connection()
         c = conn.cursor()
         sql = '''
-            SELECT u.full_name, a.date, a.check_in, a.check_out, a.total_wage,
+            SELECT a.user_id, u.full_name, a.date, a.check_in, a.check_out, a.total_wage,
                    a.base_wage, a.overtime_wage,
                    r.salary_type, r.rate_n, r.rate_m, r.rate_k, r.rate_overtime,
                    r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute,
@@ -775,15 +795,16 @@ def get_pending_correction_requests():
 # Cash taken before payday. Only ACTIVE rows count towards anything; a voided
 # one stays in the table as a record of the mistake.
 
-def add_advance(user_id, amount, note, created_at):
+def add_advance(user_id, amount, note, created_at, created_by=None):
     """created_at is Tashkent time; its date decides which month the advance
-    comes out of."""
+    comes out of. created_by is set when an admin enters it for the employee."""
     try:
         conn = get_connection()
         c = conn.cursor()
         c.execute(
-            'INSERT INTO advances (user_id, amount, note, date, created_at) VALUES (?, ?, ?, ?, ?)',
-            (user_id, amount, note, created_at.date(), created_at)
+            'INSERT INTO advances (user_id, amount, note, date, created_at, created_by) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (user_id, amount, note, created_at.date(), created_at, created_by)
         )
         advance_id = c.lastrowid
         conn.commit()
@@ -799,9 +820,10 @@ def get_advance(advance_id):
         conn = get_connection()
         c = conn.cursor()
         c.execute('''
-            SELECT a.*, u.full_name
+            SELECT a.*, u.full_name, cb.full_name AS created_by_name
             FROM advances a
             LEFT JOIN users u ON a.user_id = u.id
+            LEFT JOIN users cb ON a.created_by = cb.id
             WHERE a.id = ?
         ''', (advance_id,))
         row = c.fetchone()
@@ -849,6 +871,85 @@ def get_advances(start_date, end_date, user_id=None):
         return rows
     except Exception as e:
         logger.error(f"Error getting advances: {e}")
+        return []
+
+
+# ==================== PAYMENTS ====================
+# Salary paid out, per employee per month. Like advances, a mistaken row is
+# voided rather than deleted.
+
+def add_payment(user_id, month, amount, created_by, created_at):
+    """month is the first day of the month the pay is for."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO payments (user_id, month, amount, created_at, created_by) VALUES (?, ?, ?, ?, ?)',
+            (user_id, month, amount, created_at, created_by)
+        )
+        payment_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return payment_id
+    except Exception as e:
+        logger.error(f"Error adding payment for user {user_id}: {e}")
+        raise
+
+
+def get_payment(payment_id):
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT p.*, u.full_name
+            FROM payments p
+            LEFT JOIN users u ON p.user_id = u.id
+            WHERE p.id = ?
+        ''', (payment_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        logger.error(f"Error getting payment {payment_id}: {e}")
+        return None
+
+
+def void_payment(payment_id, admin_id):
+    """Returns False if it was already voided (or never existed)."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("UPDATE payments SET status = 'VOID', voided_by = ? WHERE id = ? AND status = 'ACTIVE'",
+                  (admin_id, payment_id))
+        voided = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return voided
+    except Exception as e:
+        logger.error(f"Error voiding payment {payment_id}: {e}")
+        raise
+
+
+def get_payments(month, user_id=None):
+    """Active payments made for `month` (its first day), oldest first."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        sql = '''SELECT p.id, p.user_id, p.month, p.amount, p.created_at, u.full_name
+                 FROM payments p
+                 JOIN users u ON p.user_id = u.id
+                 WHERE p.status = 'ACTIVE' AND p.month = ? '''
+        params = [month]
+        if user_id is not None:
+            sql += 'AND p.user_id = ? '
+            params.append(user_id)
+        sql += 'ORDER BY p.created_at'
+        c.execute(sql, params)
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting payments: {e}")
         return []
 
 

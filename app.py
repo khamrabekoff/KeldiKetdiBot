@@ -215,6 +215,7 @@ COR_REQ_DATE, COR_REQ_IN, COR_REQ_OUT, COR_REQ_CONFIRM = range(22, 26)
 SET_TIME_VALUE = 26
 HOLIDAY_ADD = 27
 ADV_AMOUNT, ADV_NOTE, ADV_CONFIRM = range(28, 31)
+PAY_SUM = 31
 
 telegram_app = None
 
@@ -436,14 +437,10 @@ async def admin_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
     ym = data.split('_report_')[-1] if '_report_' in data else data.split(':', 1)[1]
     context.user_data['report_month'] = ym
 
-    buttons = [[
-        InlineKeyboardButton("📥 Excel", callback_data=f"repx:xls:{ym}"),
-        InlineKeyboardButton("📄 PDF", callback_data=f"repx:pdf:{ym}"),
-    ]]
     try:
         await query.edit_message_text(
             ui.admin_month_report_card(_month_start(ym)),
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=ui.admin_report_keyboard(ym),
             parse_mode='HTML',
         )
     except BadRequest as e:
@@ -528,6 +525,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     InlineKeyboardButton("💵 Stavka", callback_data=f"act_rates_{user_id}"),
                     InlineKeyboardButton("📝 Vaqt", callback_data=f"act_att_{user_id}"),
                 ],
+                [InlineKeyboardButton("💸 Avans berish", callback_data=f"advg:{user_id}")],
                 [InlineKeyboardButton("❌ O'chirish", callback_data=f"del_{user_id}")],
             ]
             await query.edit_message_text(
@@ -1569,9 +1567,30 @@ async def advance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(update.effective_user.id)
     if not user or user['role'] != 'employee':
         return ConversationHandler.END
-    context.user_data.pop('advance', None)
+    context.user_data['advance'] = {'target': user['id'], 'by_admin': False}
     await update.message.reply_text(
         ui.advance_amount_prompt(user['id']),
+        reply_markup=ui.advance_back_keyboard(),
+        parse_mode='HTML',
+    )
+    return ADV_AMOUNT
+
+
+async def advance_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Same flow, entered by an admin from an employee's card: the admin hands
+    the cash over and records it for them."""
+    query = update.callback_query
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
+    employee = db.get_user(int(query.data.split(':')[1]))
+    if not employee or employee['role'] != 'employee':
+        await query.message.reply_text("❌ Xodim topilmadi.")
+        return ConversationHandler.END
+    context.user_data['advance'] = {'target': employee['id'], 'by_admin': True,
+                                    'name': employee['full_name']}
+    await query.message.reply_text(
+        ui.advance_admin_amount_prompt(employee),
         reply_markup=ui.advance_back_keyboard(),
         parse_mode='HTML',
     )
@@ -1582,11 +1601,14 @@ async def advance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == msg.BTN_BACK:
         return await advance_cancel(update, context)
+    draft = context.user_data.get('advance')
+    if not draft:
+        return ConversationHandler.END
     amount = utils.parse_amount(text)
     if amount is None:
         await update.message.reply_text(ui.ADVANCE_BAD_AMOUNT, parse_mode='HTML')
         return ADV_AMOUNT
-    context.user_data['advance'] = {'amount': amount}
+    draft['amount'] = amount
     await update.message.reply_text(
         ui.ADVANCE_NOTE_PROMPT, reply_markup=ui.advance_note_keyboard(), parse_mode='HTML'
     )
@@ -1602,7 +1624,7 @@ async def advance_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     draft['note'] = None if text == ui.BTN_ADVANCE_SKIP_NOTE else text[:ui.ADVANCE_NOTE_LIMIT]
     await update.message.reply_text(
-        ui.advance_confirm_text(draft['amount'], draft['note']),
+        ui.advance_confirm_text(draft['amount'], draft['note'], draft.get('name')),
         reply_markup=ui.advance_confirm_keyboard(),
         parse_mode='HTML',
     )
@@ -1620,12 +1642,29 @@ async def advance_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not draft:
         return ConversationHandler.END
 
-    user_id = update.effective_user.id
-    advance_id = db.add_advance(user_id, draft['amount'], draft['note'], utils.get_now())
-    # Admins first: the record is already saved, and if the employee's own
-    # reply is the call the proxy drops, the admins must still have heard.
-    await _notify_admins_of_advance(advance_id)
-    user = db.get_user(user_id)
+    author = update.effective_user.id
+    by_admin = draft['by_admin'] and await check_admin(author)
+    advance_id = db.add_advance(draft['target'], draft['amount'], draft['note'], utils.get_now(),
+                                created_by=author if by_admin else None)
+    # Others first: the record is already saved, and if the author's own
+    # reply is the call the proxy drops, everyone else must still have heard.
+    await _notify_admins_of_advance(advance_id, skip=author)
+    if by_admin:
+        advance = db.get_advance(advance_id)
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=draft['target'], text=ui.advance_given_text(advance), parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Failed to tell employee about advance {advance_id}: {e}")
+        audit.log_employee_action(author, draft['target'], 'advance_given',
+                                  f"Avans yozildi: {ui.fmt_money(draft['amount'])}", f"ID {advance_id}")
+        await update.message.reply_text(
+            ui.advance_recorded_text(advance), reply_markup=ui.admin_keyboard(), parse_mode='HTML'
+        )
+        return ConversationHandler.END
+
+    user = db.get_user(author)
     await send_employee_home(update, user, note=ui.advance_saved_note(draft['amount']))
     return ConversationHandler.END
 
@@ -1633,12 +1672,15 @@ async def advance_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def advance_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('advance', None)
     user = db.get_user(update.effective_user.id)
-    if user:
+    if user and user['role'] == 'admin':
+        await update.message.reply_text("Bekor qilindi.", reply_markup=ui.admin_keyboard())
+    elif user:
         await send_employee_home(update, user, note="<i>Bekor qilindi.</i>")
     return ConversationHandler.END
 
 
-async def _notify_admins_of_advance(advance_id):
+async def _notify_admins_of_advance(advance_id, skip=None):
+    """Every admin but `skip` (the one who entered it, if an admin did)."""
     advance = db.get_advance(advance_id)
     if not advance:
         return
@@ -1647,7 +1689,7 @@ async def _notify_admins_of_advance(advance_id):
     conn = db.get_connection()
     c = conn.cursor()
     c.execute("SELECT id FROM users WHERE role='admin'")
-    admins = c.fetchall()
+    admins = [row for row in c.fetchall() if row['id'] != skip]
     conn.close()
     for admin in admins:
         try:
@@ -1694,6 +1736,166 @@ async def advance_void_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except BadRequest as e:
         if 'not modified' not in str(e).lower():
             raise
+
+
+# ==================== PAYMENTS ====================
+# The admin marks salary as paid from the monthly report: 💰 To'lov -> an
+# employee -> pay what is owed, pay another sum, or settle a month whose
+# advances exceed the pay. The screens are edited in place.
+
+async def _edit_quietly(query, text, keyboard):
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+    except BadRequest as e:
+        if 'not modified' not in str(e).lower():
+            raise
+
+
+async def payment_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return
+    text, keyboard = ui.payment_list_card(_month_start(query.data.split(':')[2]))
+    await _edit_quietly(query, text, keyboard)
+
+
+async def payment_employee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return
+    _, _, user_id, ym = query.data.split(':')
+    text, keyboard = ui.payment_employee_card(int(user_id), _month_start(ym))
+    await _edit_quietly(query, text, keyboard)
+
+
+async def _tell_employee_about_payment(user_id, month, amount, balance_before):
+    show = settings.get_bool('show_employee_earnings')
+    if amount > 0:
+        text = ui.payment_employee_text(month, amount, show)
+    elif balance_before < 0 and show:
+        text = ui.payment_debt_text(month, -balance_before)
+    else:
+        return
+    try:
+        await telegram_app.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Failed to tell employee {user_id} about payment: {e}")
+
+
+async def _record_payment(admin_id, user_id, month, amount, balance_before):
+    payment_id = db.add_payment(user_id, month, amount, admin_id, utils.get_now())
+    audit.log_employee_action(admin_id, user_id, 'payment_recorded',
+                              f"To'lov: {ui.fmt_money(amount)}",
+                              f"{month.strftime('%Y-%m')} (ID {payment_id})")
+    await _tell_employee_about_payment(user_id, month, amount, balance_before)
+    return payment_id
+
+
+async def payment_do_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pay exactly what the screen showed as owed, or settle the month when
+    nothing is owed. The shown balance travels in the button: if it no longer
+    matches - another admin paid in the meantime, a day was edited - nothing
+    is recorded and the screen is redrawn with the current figures."""
+    query = update.callback_query
+    if not await check_admin(query.from_user.id):
+        await _answer_quietly(query)
+        return
+    _, _, user_id, ym, shown_cents = query.data.split(':')
+    user_id, month = int(user_id), _month_start(ym)
+
+    entry = analytics.employee_month(user_id, month)
+    current_cents = int(round(entry['to_pay'] * 100)) if entry else 0
+    if not entry or current_cents != int(shown_cents) or (current_cents <= 0 and entry['settled']):
+        await _answer_quietly(query, "Hisob o'zgardi — qayta ko'ring")
+    else:
+        amount = max(current_cents, 0) / 100
+        await _record_payment(query.from_user.id, user_id, month, amount, entry['to_pay'])
+        await _answer_quietly(query, "Saqlandi")
+
+    text, keyboard = ui.payment_employee_card(user_id, month)
+    await _edit_quietly(query, text, keyboard)
+
+
+async def payment_void_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await check_admin(query.from_user.id):
+        await _answer_quietly(query)
+        return
+    payment_id = int(query.data.split(':')[2])
+    payment = db.get_payment(payment_id)
+    if not payment:
+        await _answer_quietly(query, "Topilmadi")
+        return
+    if db.void_payment(payment_id, query.from_user.id):
+        audit.log_employee_action(query.from_user.id, payment['user_id'], 'payment_voided',
+                                  f"To'lov bekor qilindi: {ui.fmt_money(payment['amount'])}",
+                                  f"{payment['month'].strftime('%Y-%m')} (ID {payment_id})")
+        await _answer_quietly(query, "Bekor qilindi")
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=payment['user_id'],
+                text=ui.payment_voided_text(payment, settings.get_bool('show_employee_earnings')),
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logger.error(f"Failed to tell employee about voided payment {payment_id}: {e}")
+    else:
+        await _answer_quietly(query, "Allaqachon bekor qilingan")
+    text, keyboard = ui.payment_employee_card(payment['user_id'], payment['month'])
+    await _edit_quietly(query, text, keyboard)
+
+
+async def payment_sum_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pay a sum other than the full balance - part now, or more than owed."""
+    query = update.callback_query
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
+    _, _, user_id, ym = query.data.split(':')
+    employee = db.get_user(int(user_id))
+    if not employee:
+        await query.message.reply_text("❌ Xodim topilmadi.")
+        return ConversationHandler.END
+    context.user_data['payment'] = {'user_id': employee['id'], 'month': _month_start(ym)}
+    await query.message.reply_text(
+        ui.payment_sum_prompt(employee['full_name'], _month_start(ym)),
+        reply_markup=ui.advance_back_keyboard(),
+        parse_mode='HTML',
+    )
+    return PAY_SUM
+
+
+async def payment_sum_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == msg.BTN_BACK:
+        return await payment_sum_cancel(update, context)
+    draft = context.user_data.get('payment')
+    if not draft:
+        return ConversationHandler.END
+    amount = utils.parse_amount(text)
+    if amount is None:
+        await update.message.reply_text(ui.ADVANCE_BAD_AMOUNT, parse_mode='HTML')
+        return PAY_SUM
+    context.user_data.pop('payment', None)
+
+    entry = analytics.employee_month(draft['user_id'], draft['month'])
+    await _record_payment(update.effective_user.id, draft['user_id'], draft['month'], amount,
+                          entry['to_pay'] if entry else 0)
+    await update.message.reply_text(
+        f"✅ To'lov saqlandi: <b>{ui.fmt_money(amount)}</b>",
+        reply_markup=ui.admin_keyboard(), parse_mode='HTML',
+    )
+    card, keyboard = ui.payment_employee_card(draft['user_id'], draft['month'])
+    await update.message.reply_text(card, reply_markup=keyboard, parse_mode='HTML')
+    return ConversationHandler.END
+
+
+async def payment_sum_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('payment', None)
+    await update.message.reply_text("Bekor qilindi.", reply_markup=ui.admin_keyboard())
+    return ConversationHandler.END
 
 
 # ==================== HANDLE TEXT ====================
@@ -2217,9 +2419,10 @@ def create_application():
         # Advance Conversation (employee records cash taken before payday)
         advance_back = MessageHandler(filters.Regex(f"^{re.escape(msg.BTN_BACK)}$"), advance_cancel)
         advance_conv = ConversationHandler(
-            entry_points=[MessageHandler(
-                filters.Regex(f"^{re.escape(ui.BTN_ADVANCE)}$"), advance_start
-            )],
+            entry_points=[
+                MessageHandler(filters.Regex(f"^{re.escape(ui.BTN_ADVANCE)}$"), advance_start),
+                CallbackQueryHandler(advance_admin_start, pattern="^advg:"),
+            ],
             states={
                 ADV_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_amount)],
                 ADV_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_note)],
@@ -2231,6 +2434,19 @@ def create_application():
             allow_reentry=True,
         )
         app_config.add_handler(advance_conv)
+
+        # Payment of another sum than the full balance (admin types the amount)
+        payment_sum_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(payment_sum_start, pattern="^pay:sum:")],
+            states={
+                PAY_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_sum_value)],
+            },
+            fallbacks=[CommandHandler("cancel", payment_sum_cancel)],
+            name="payment_sum_conv",
+            persistent=False,
+            allow_reentry=True,
+        )
+        app_config.add_handler(payment_sum_conv)
 
         # Settings Conversation (edit a work-hour value)
         settings_conv = ConversationHandler(
@@ -2263,6 +2479,10 @@ def create_application():
         app_config.add_handler(CallbackQueryHandler(holidays_delete_callback, pattern="^hol:del:"))
         app_config.add_handler(CallbackQueryHandler(pending_delete_callback, pattern="^pdel:"))
         app_config.add_handler(CallbackQueryHandler(advance_void_callback, pattern="^adv:void:"))
+        app_config.add_handler(CallbackQueryHandler(payment_list_callback, pattern="^pay:list:"))
+        app_config.add_handler(CallbackQueryHandler(payment_employee_callback, pattern="^pay:emp:"))
+        app_config.add_handler(CallbackQueryHandler(payment_do_callback, pattern="^pay:do:"))
+        app_config.add_handler(CallbackQueryHandler(payment_void_callback, pattern="^pay:void:"))
 
         # Manage Employee Conversation (edit rates / attendance / delete)
         manage_emp_handler = ConversationHandler(

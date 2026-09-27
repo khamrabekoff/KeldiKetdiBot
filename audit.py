@@ -18,6 +18,9 @@ ACTION_TYPES = {
     'broadcast_sent': 'Отправлено массовое сообщение',
     'report_generated': 'Создан отчет',
     'advance_voided': 'Аванс отменён',
+    'advance_given': 'Аванс записан админом',
+    'payment_recorded': 'Выплата зарплаты',
+    'payment_voided': 'Выплата отменена',
 }
 
 

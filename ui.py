@@ -241,14 +241,19 @@ def employee_stats_card(user_id):
     elif show_earnings:
         text += f"💰 Jami ish haqi: <b>{fmt_money(total_wage)}</b>\n"
 
-    # The employee typed these in themselves, so they see them even where pay
-    # is hidden - only the balance, which would reveal the pay, is left out.
+    # Advances are the employee's own record, so they see them even where pay
+    # is hidden. Carry, payments and the balance would reveal the pay.
     advances = month_advances(user_id, start)
-    if advances:
-        advance_total = sum(a['amount'] for a in advances)
-        text += f"💸 Avans: <b>{fmt_money(advance_total)}</b>\n"
+    balance = analytics.employee_month(user_id, start)
+    if balance and (balance['advance'] or balance['carry_in'] or balance['paid']):
+        if show_earnings and balance['carry_in']:
+            text += f"↪️ O'tgan oydan: <b>{fmt_money(balance['carry_in'])}</b>\n"
+        if balance['advance']:
+            text += f"💸 Avans: <b>{fmt_money(balance['advance'])}</b>\n"
+        if show_earnings and balance['paid']:
+            text += f"✅ To'langan: <b>{fmt_money(balance['paid'])}</b>\n"
         if show_earnings:
-            text += f"💵 Qoldiq: <b>{fmt_money(total_wage - advance_total)}</b>\n"
+            text += f"💵 Qoldiq: <b>{fmt_money(balance['to_pay'])}</b>\n"
 
     recent = [r for r in rows if r['check_in']][-7:]
     if recent:
@@ -509,14 +514,18 @@ def admin_employee_card(emp_id):
             f"<code>Jami:    {fmt_money(total_wage)}</code>"
         )
 
+    balance = analytics.employee_month(emp_id, now.date())
+    if balance and (balance['advance'] or balance['carry_in'] or balance['paid']):
+        if balance['carry_in']:
+            money_lines += f"\n<code>O'tgan:  {fmt_money(balance['carry_in'])}</code>"
+        if balance['advance']:
+            money_lines += f"\n<code>Avans:   {fmt_money(balance['advance'])}</code>"
+        if balance['paid']:
+            money_lines += f"\n<code>To'lov:  {fmt_money(balance['paid'])}</code>"
+        money_lines += f"\n<code>Qoldiq:  {fmt_money(balance['to_pay'])}</code>"
     advances = month_advances(emp_id, now.date())
     if advances:
-        advance_total = sum(a['amount'] for a in advances)
-        money_lines += (
-            f"\n<code>Avans:   {fmt_money(advance_total)}</code>"
-            f"\n<code>Qoldiq:  {fmt_money(total_wage - advance_total)}</code>"
-            f"\n\n💸 <b>Avanslar</b>\n" + advance_lines(advances).rstrip('\n')
-        )
+        money_lines += f"\n\n💸 <b>Avanslar</b>\n" + advance_lines(advances).rstrip('\n')
 
     return (
         f"👤 <b>{emp['full_name'].upper()}</b>\n"
@@ -618,11 +627,7 @@ def admin_month_report_card(start_date):
             )
         else:
             text += f"<code>  {fmt_money(p['wage'])}</code>\n"
-        if p['advance']:
-            text += (
-                f"<code>  − {fmt_money(p['advance'], unit=False)} avans</code>\n"
-                f"<code>  = {fmt_money(p['to_pay'])} to'lash kerak</code>\n"
-            )
+        text += balance_lines(p)
         text += "\n"
 
     totals = payroll['totals']
@@ -630,10 +635,167 @@ def admin_month_report_card(start_date):
     if totals['overtime']:
         text += f"⭐ <b>Qo'shimcha: {fmt_money(totals['overtime'])}</b>\n"
     text += f"💵 <b>JAMI: {fmt_money(totals['wage'])}</b>"
+    if totals['carry_in']:
+        text += f"\n↪️ <b>O'tgan oydan: {fmt_money(totals['carry_in'])}</b>"
     if totals['advance']:
         text += f"\n💸 <b>Avans: {fmt_money(totals['advance'])}</b>"
+    if totals['paid']:
+        text += f"\n✅ <b>To'langan: {fmt_money(totals['paid'])}</b>"
     text += f"\n💰 <b>TO'LASH KERAK: {fmt_money(totals['to_pay'])}</b>"
     return text
+
+
+def is_paid_off(entry):
+    return entry['settled'] and round(entry['to_pay'], 2) == 0
+
+
+def balance_lines(entry):
+    """What turns the wage into 'to pay' for one employee, one <code> line per
+    step - empty when nothing does, so a plain month reads as it always did."""
+    if not (entry['carry_in'] or entry['advance'] or entry['paid']):
+        return ""
+    lines = ""
+    if entry['carry_in']:
+        sign = '+' if entry['carry_in'] > 0 else '−'
+        lines += f"<code>  {sign} {fmt_money(abs(entry['carry_in']), unit=False)} o'tgan oydan</code>\n"
+    if entry['advance']:
+        lines += f"<code>  − {fmt_money(entry['advance'], unit=False)} avans</code>\n"
+    if entry['paid']:
+        lines += f"<code>  − {fmt_money(entry['paid'], unit=False)} to'langan</code>\n"
+    mark = " ✅" if is_paid_off(entry) else ""
+    lines += f"<code>  = {fmt_money(entry['to_pay'])} to'lash kerak</code>{mark}\n"
+    return lines
+
+
+def admin_report_keyboard(ym):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 Excel", callback_data=f"repx:xls:{ym}"),
+            InlineKeyboardButton("📄 PDF", callback_data=f"repx:pdf:{ym}"),
+        ],
+        [InlineKeyboardButton("💰 To'lov", callback_data=f"pay:list:{ym}")],
+    ])
+
+
+# ==================== PAYMENTS ====================
+# The admin marks salary as paid, per employee per month, from the monthly
+# report. A settled month passes whatever is left of its balance on to the next.
+
+def payment_list_card(start_date):
+    """Who still has to be paid for a month, one button per employee."""
+    payroll = analytics.month_payroll(start_date)
+    ym = start_date.strftime('%Y-%m')
+    text = (
+        f"💰 <b>TO'LOV</b>\n"
+        f"<i>{fmt_month(start_date)}</i>\n"
+        f"{'━' * 18}\n\n"
+    )
+    keyboard = []
+    if not payroll['employees']:
+        text += "<i>Bu oyda ma'lumot yo'q.</i>"
+    else:
+        text += (
+            "Kimga to'laysiz? Xodimni tanlang.\n\n"
+            f"💰 Jami to'lash kerak: <b>{fmt_money(payroll['totals']['to_pay'])}</b>"
+        )
+        for entry in payroll['employees']:
+            mark = "✅" if is_paid_off(entry) else "💰"
+            keyboard.append([InlineKeyboardButton(
+                f"{mark} {entry['name']} · {fmt_money(entry['to_pay'])}",
+                callback_data=f"pay:emp:{entry['user_id']}:{ym}",
+            )])
+    keyboard.append([InlineKeyboardButton("◀ Hisobot", callback_data=f"rep:{ym}")])
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def payment_employee_card(user_id, start_date):
+    """One employee's month: how the amount to pay is made up, the payments
+    already recorded, and the button that pays or settles it."""
+    ym = start_date.strftime('%Y-%m')
+    entry = analytics.employee_month(user_id, start_date)
+    back = [InlineKeyboardButton("◀ Ro'yxat", callback_data=f"pay:list:{ym}")]
+    if not entry:
+        return "❌ Bu oyda ma'lumot yo'q.", InlineKeyboardMarkup([back])
+
+    to_pay = round(entry['to_pay'], 2)
+    text = (
+        f"💰 <b>{esc(entry['name'])}</b>\n"
+        f"<i>{fmt_month(start_date)} uchun</i>\n"
+        f"{'━' * 18}\n\n"
+        f"<code>Ish haqi:  {fmt_money(entry['wage'])}</code>\n"
+    )
+    if entry['carry_in']:
+        text += f"<code>O'tgan oy: {fmt_money(entry['carry_in'])}</code>\n"
+    if entry['advance']:
+        text += f"<code>Avans:     {fmt_money(-entry['advance'])}</code>\n"
+    if entry['paid']:
+        text += f"<code>To'langan: {fmt_money(-entry['paid'])}</code>\n"
+    text += f"\n💰 To'lash kerak: <b>{fmt_money(to_pay)}</b>\n"
+
+    payments = db.get_payments(start_date, user_id)
+    if payments:
+        text += "\n<b>To'lovlar:</b>\n"
+        for p in payments:
+            text += f"<code>{p['created_at'].strftime('%d.%m %H:%M')}  {fmt_money(p['amount'])}</code>\n"
+
+    keyboard = []
+    cents = int(round(to_pay * 100))
+    if to_pay > 0:
+        keyboard.append([InlineKeyboardButton(
+            f"✅ {fmt_money(to_pay)} to'landi", callback_data=f"pay:do:{user_id}:{ym}:{cents}"
+        )])
+    elif not entry['settled']:
+        if to_pay < 0:
+            text += (f"\n<i>Avans ish haqidan {fmt_money(-to_pay)} ko'p. Oyni yopsangiz, bu summa "
+                     f"keyingi oy hisobidan ushlab qolinadi.</i>\n")
+        keyboard.append([InlineKeyboardButton(
+            "🔒 Oyni yopish", callback_data=f"pay:do:{user_id}:{ym}:{cents}"
+        )])
+    elif to_pay == 0:
+        text += "\n✅ <b>To'liq to'langan.</b>\n"
+    else:
+        text += f"\n<i>Oy yopilgan: {fmt_money(-to_pay)} keyingi oyga qarz bo'lib o'tadi.</i>\n"
+
+    keyboard.append([InlineKeyboardButton("✏️ Boshqa summa", callback_data=f"pay:sum:{user_id}:{ym}")])
+    for p in payments:
+        keyboard.append([InlineKeyboardButton(
+            f"🗑 {p['created_at'].strftime('%d.%m')} · {fmt_money(p['amount'])} — bekor qilish",
+            callback_data=f"pay:void:{p['id']}",
+        )])
+    keyboard.append(back)
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def payment_sum_prompt(name, start_date):
+    return (
+        f"💰 <b>{esc(name)}</b> — {fmt_month(start_date)}\n\n"
+        "Qancha to'ladingiz? Summani yozing.\n"
+        "<i>Masalan: 250. Qolgani keyingi oyga o'tadi.</i>\n\n"
+        "Bekor qilish uchun /cancel"
+    )
+
+
+def payment_employee_text(start_date, amount, show_amount):
+    """To the employee once the admin records their pay."""
+    if show_amount:
+        return f"✅ {fmt_month(start_date)} uchun ish haqi to'landi: <b>{fmt_money(amount)}</b>"
+    return f"✅ {fmt_month(start_date)} uchun ish haqingiz to'landi."
+
+
+def payment_debt_text(start_date, debt):
+    """To the employee when a month closes with advances above the pay."""
+    return (
+        f"🔒 {fmt_month(start_date)} hisobi yopildi.\n"
+        f"Avans ish haqidan <b>{fmt_money(debt)}</b> ko'p edi — bu summa "
+        f"{fmt_month(utils.next_month(start_date))} hisobidan ushlab qolinadi."
+    )
+
+
+def payment_voided_text(payment, show_amount):
+    amount = f" {fmt_money(payment['amount'])}" if show_amount and payment['amount'] else ""
+    return (
+        f"❌ {fmt_month(payment['month'])} uchun{amount} to'lov yozuvi admin tomonidan bekor qilindi."
+    )
 
 
 # ==================== ADVANCES ====================
@@ -679,14 +841,57 @@ def advance_confirm_keyboard():
     return ReplyKeyboardMarkup([[msg.BTN_BACK, BTN_ADVANCE_CONFIRM]], resize_keyboard=True)
 
 
-def advance_confirm_text(amount, note):
+def advance_admin_amount_prompt(employee):
+    """The admin hands cash over and enters it for the employee."""
     text = (
-        "Tasdiqlaysizmi?\n\n"
+        "💸 <b>AVANS BERISH</b>\n"
+        f"{'━' * 18}\n\n"
+        f"👤 <b>{esc(employee['full_name'])}</b>\n\n"
+        "Qancha berdingiz? Summani yozing.\n"
+        "<i>Masalan: 300</i>"
+    )
+    taken = month_advances(employee['id'], utils.get_now().date())
+    if taken:
+        text += (
+            f"\n\n<i>Bu oy olingan: {fmt_money(sum(a['amount'] for a in taken))} "
+            f"({len(taken)} marta)</i>"
+        )
+    return text
+
+
+def advance_confirm_text(amount, note, name=None):
+    text = "Tasdiqlaysizmi?\n\n"
+    if name:
+        text += f"👤 Xodim: <b>{esc(name)}</b>\n"
+    text += (
         f"💰 Summa: <b>{fmt_money(amount)}</b>\n"
         f"📅 Sana: <b>{fmt_date(utils.get_now())}</b>\n"
     )
     if note:
         text += f"📝 Izoh: <i>{esc(note)}</i>\n"
+    return text
+
+
+def advance_recorded_text(advance):
+    """To the admin who entered an advance for someone."""
+    return (
+        f"✅ <b>Avans yozildi:</b> {esc(advance['full_name'] or '?')} — "
+        f"{fmt_money(advance['amount'])}\n"
+        f"<i>Xodim va boshqa adminlar xabardor qilindi.</i>"
+    )
+
+
+def advance_given_text(advance):
+    """To the employee, when an admin has entered an advance for them."""
+    created = advance['created_at']
+    text = (
+        "💸 <b>Sizga avans yozildi</b>\n\n"
+        f"💰 Summa: <b>{fmt_money(advance['amount'])}</b>\n"
+        f"📅 {fmt_date(created)} · {created.strftime('%H:%M')}\n"
+    )
+    if advance['note']:
+        text += f"📝 Izoh: <i>{esc(advance['note'])}</i>\n"
+    text += "\n<i>Xato bo'lsa, admin bilan gaplashing.</i>"
     return text
 
 
@@ -708,6 +913,8 @@ def advance_admin_card(advance):
     )
     if advance['note']:
         text += f"📝 Izoh: <i>{esc(advance['note'])}</i>\n"
+    if advance['created_by']:
+        text += f"✍️ Admin yozdi: <b>{esc(advance['created_by_name'] or '?')}</b>\n"
     text += f"\n<i>{fmt_month(created)} jami avans: {fmt_money(month_total)}</i>"
     if advance['status'] != 'ACTIVE':
         text += "\n\n❌ <b>Bekor qilingan</b>"
