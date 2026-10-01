@@ -1425,6 +1425,38 @@ async def cancel_add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+# Main-menu buttons stay on screen during every conversation, and people tap
+# them instead of finishing (or looking for "Ortga"). Without this the
+# conversation stayed open: a text step swallowed the label as its answer,
+# and a button step ignored every later tap - e.g. after abandoning
+# "📝 Vaqt", the employee cards under "👥 Xodimlar" stopped responding.
+MENU_BUTTONS = (
+    ui.BTN_ADMIN_TODAY, ui.BTN_ADMIN_REPORT, ui.BTN_ADMIN_EMPLOYEES,
+    ui.BTN_ADMIN_CORRECTIONS, ui.BTN_ADMIN_SETTINGS,
+    msg.BTN_ADMIN_TODAY, msg.BTN_ADMIN_MONTH, msg.BTN_ADMIN_EMPLOYEES,
+    ui.BTN_CHECK_IN, ui.BTN_CHECK_OUT, ui.BTN_STATUS, ui.BTN_MY_STATS,
+    msg.BTN_CHECK_IN, msg.BTN_CHECK_OUT, msg.BTN_TODAY_STAT, msg.BTN_MY_STATS,
+)
+
+
+async def leave_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Drop whatever conversation was open and do what the tapped button says."""
+    await unknown_text(update, context)
+    return ConversationHandler.END
+
+
+def with_menu_exit(states):
+    """Let a main-menu tap end the conversation from any of its steps.
+
+    It goes first in each step: in a text step the generic handler would
+    otherwise take the label as the typed answer."""
+    menu_exit = MessageHandler(
+        filters.Regex("^(" + "|".join(re.escape(b) for b in MENU_BUTTONS) + ")$"),
+        leave_to_menu,
+    )
+    return {state: [menu_exit] + handlers for state, handlers in states.items()}
+
+
 # ==================== CORRECTION REQUEST ====================
 
 async def correction_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2380,7 +2412,7 @@ def create_application():
                 MessageHandler(filters.Regex(f"^{re.escape(msg.BTN_ADMIN_ADD_EMP)}$"), start_add_employee),
                 CallbackQueryHandler(start_add_employee_cb, pattern="^addemp$"),
             ],
-            states={
+            states=with_menu_exit({
                 ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_name)],
                 ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_phone)],
                 ADD_SALARY_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_salary_type)],
@@ -2391,10 +2423,11 @@ def create_application():
                 ADD_MONTHLY_SALARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_monthly_salary)],
                 ADD_OVERTIME_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_overtime_rate)],
                 ADD_RATE_PER_MINUTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_emp_rate_per_minute)],
-            },
+            }),
             fallbacks=[],
             name="add_emp_conv",
-            persistent=False
+            persistent=False,
+            allow_reentry=True,
         )
         app_config.add_handler(add_emp_handler)
 
@@ -2404,15 +2437,16 @@ def create_application():
                 filters.Regex(f"^({re.escape(ui.BTN_CORRECTION)}|{re.escape(msg.BTN_CORRECTION_REQUEST)})$"),
                 correction_request_start,
             )],
-            states={
+            states=with_menu_exit({
                 COR_REQ_DATE: [CallbackQueryHandler(cor_req_date_callback, pattern="^creq_dt_")],
                 COR_REQ_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, correction_request_in)],
                 COR_REQ_OUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, correction_request_out)],
                 COR_REQ_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, correction_request_confirm)]
-            },
+            }),
             fallbacks=[],
             name="correction_conv",
-            persistent=False
+            persistent=False,
+            allow_reentry=True,
         )
         app_config.add_handler(correction_conv)
 
@@ -2423,11 +2457,11 @@ def create_application():
                 MessageHandler(filters.Regex(f"^{re.escape(ui.BTN_ADVANCE)}$"), advance_start),
                 CallbackQueryHandler(advance_admin_start, pattern="^advg:"),
             ],
-            states={
+            states=with_menu_exit({
                 ADV_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_amount)],
                 ADV_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_note)],
                 ADV_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, advance_confirm)],
-            },
+            }),
             fallbacks=[CommandHandler("cancel", advance_cancel), advance_back],
             name="advance_conv",
             persistent=False,
@@ -2438,9 +2472,9 @@ def create_application():
         # Payment of another sum than the full balance (admin types the amount)
         payment_sum_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(payment_sum_start, pattern="^pay:sum:")],
-            states={
+            states=with_menu_exit({
                 PAY_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_sum_value)],
-            },
+            }),
             fallbacks=[CommandHandler("cancel", payment_sum_cancel)],
             name="payment_sum_conv",
             persistent=False,
@@ -2451,9 +2485,9 @@ def create_application():
         # Settings Conversation (edit a work-hour value)
         settings_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(settings_pick_callback, pattern="^set:")],
-            states={
+            states=with_menu_exit({
                 SET_TIME_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_set_value)],
-            },
+            }),
             fallbacks=[CommandHandler("cancel", settings_cancel)],
             name="settings_conv",
             persistent=False,
@@ -2464,9 +2498,9 @@ def create_application():
         # Holidays (admin marks official days off; each change reprices the month)
         holidays_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(holidays_add_start, pattern="^hol:add:")],
-            states={
+            states=with_menu_exit({
                 HOLIDAY_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, holidays_add_value)],
-            },
+            }),
             fallbacks=[CommandHandler("cancel", holidays_add_cancel)],
             name="holidays_conv",
             persistent=False,
@@ -2490,7 +2524,7 @@ def create_application():
                 CallbackQueryHandler(handle_callback_query, pattern="^edit_"),
                 CallbackQueryHandler(handle_callback_query, pattern="^del_"),
             ],
-            states={
+            states=with_menu_exit({
                 ACTION_MENU: [
                     CallbackQueryHandler(employee_action_callback, pattern="^act_"),
                     CallbackQueryHandler(handle_callback_query, pattern="^del_"),
@@ -2506,10 +2540,11 @@ def create_application():
                 EDIT_ATT_DATE: [CallbackQueryHandler(edit_att_date_callback, pattern="^edt_dt_")],
                 EDIT_ATT_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_att_in_handler)],
                 EDIT_ATT_OUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_att_out_handler)],
-            },
+            }),
             fallbacks=[MessageHandler(filters.Regex(f"^{msg.BTN_BACK}$"), cancel_add_employee)],
             name="manage_emp_conv",
-            persistent=False
+            persistent=False,
+            allow_reentry=True,
         )
         app_config.add_handler(manage_emp_handler)
 
