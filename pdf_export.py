@@ -239,7 +239,7 @@ def create_monthly_pdf_report(start_date):
             alignment=1
         )
         footer_text = Paragraph(
-            f"Yaratilgan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br/>Keldi-Ketdi Bot v5.0",
+            f"Yaratilgan: {utils.get_now().strftime('%Y-%m-%d %H:%M:%S')}<br/>Keldi-Ketdi Bot v5.0",
             footer_style
         )
         elements.append(footer_text)
@@ -265,7 +265,7 @@ def create_employee_pdf_report(user_id, days=30):
         if not stats:
             return None
 
-        now = datetime.now()
+        now = utils.get_now()
         start_date = now.date() - timedelta(days=days)
         attendance = db.get_user_month_details(user_id, start_date)
 

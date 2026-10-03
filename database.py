@@ -412,6 +412,12 @@ def check_in_user(user_id, timestamp):
         row = c.fetchone()
         if row:
             conn.close()
+            if row['check_out']:
+                # The day is already closed (usually by an approved correction),
+                # so pressing KELDIM again can never succeed - say how to get out.
+                return {'success': False, 'message': (
+                    "Bugungi ish kuningiz allaqachon yopilgan. "
+                    "Vaqt noto'g'ri bo'lsa, «📝 Tuzatish» orqali so'rov yuboring.")}
             return {'success': False, 'message': "Siz bugun allaqachon kelgansiz."}
         c.execute('INSERT INTO attendance (user_id, date, check_in) VALUES (?, ?, ?)',
                   (user_id, today, timestamp))
@@ -425,9 +431,12 @@ def check_in_user(user_id, timestamp):
 
 def is_user_checked_in(user_id):
     try:
+        from utils import get_now
         conn = get_connection()
         c = conn.cursor()
-        today = datetime.date.today()
+        # Tashkent date, as check_in_user writes it - the server runs on UTC,
+        # so date.today() is still yesterday until 05:00 local time
+        today = get_now().date()
         c.execute('SELECT * FROM attendance WHERE user_id = ? AND date = ? AND check_out IS NULL',
                   (user_id, today))
         row = c.fetchone()

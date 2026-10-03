@@ -717,6 +717,15 @@ async def edit_att_out_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not utils.validate_time(out_val):
         await update.message.reply_text("Noto'g'ri format! Masalan: 18:00")
         return EDIT_ATT_OUT
+    problem = _correction_times_problem(context.user_data['edit_att_date'],
+                                        context.user_data['edit_att_in'], out_val)
+    if problem == CORRECTION_OUT_BEFORE_IN:
+        await update.message.reply_text(problem)
+        return EDIT_ATT_OUT
+    if problem:
+        await update.message.reply_text(problem)
+        await show_main_menu(update, db.get_user(update.effective_user.id))
+        return ConversationHandler.END
     try:
         user_id = context.user_data['edit_user_id']
         date_str = context.user_data['edit_att_date']
@@ -1459,6 +1468,25 @@ def with_menu_exit(states):
 
 # ==================== CORRECTION REQUEST ====================
 
+CORRECTION_OUT_BEFORE_IN = "Ketish vaqti kelish vaqtidan keyin bo'lishi kerak."
+CORRECTION_IN_FUTURE = "Bu vaqt hali kelmagan. Kechagi kun uchun bo'lsa, «Kecha» sanasini tanlang."
+
+
+def _correction_times_problem(date_str, in_str, out_str):
+    """Why a corrected day can't be recorded, or None if it can.
+
+    A check-out that hasn't happened yet closes the day in advance: a request
+    sent just after midnight for "Bugun" meant yesterday, and once approved it
+    left the employee unable to check in or out all day."""
+    in_time = datetime.strptime(f"{date_str} {in_str}", "%Y-%m-%d %H:%M")
+    out_time = datetime.strptime(f"{date_str} {out_str}", "%Y-%m-%d %H:%M")
+    if out_time <= in_time:
+        return CORRECTION_OUT_BEFORE_IN
+    if out_time > utils.get_now():
+        return CORRECTION_IN_FUTURE
+    return None
+
+
 async def correction_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = utils.get_now().date()
     buttons = []
@@ -1498,9 +1526,18 @@ async def correction_request_out(update: Update, context: ContextTypes.DEFAULT_T
     if not utils.validate_time(val):
         await update.message.reply_text("Noto'g'ri format! Masalan: 18:00")
         return COR_REQ_OUT
-    context.user_data['req_out'] = val
     date = context.user_data['req_date']
     in_time = context.user_data['req_in']
+    problem = _correction_times_problem(date, in_time, val)
+    if problem == CORRECTION_OUT_BEFORE_IN:
+        await update.message.reply_text(problem)
+        return COR_REQ_OUT
+    if problem:
+        # the date itself is wrong, so asking for another time can't help
+        await update.message.reply_text(problem + "\n\n«📝 Tuzatish»ni qaytadan bosing.")
+        await show_main_menu(update, db.get_user(update.effective_user.id))
+        return ConversationHandler.END
+    context.user_data['req_out'] = val
     buttons = [[msg.BTN_BACK, "✅ Tasdiqlash"]]
     await update.message.reply_text(msg.MSG_COR_REQ_CONFIRM.format(date=date, in_time=in_time, out_time=val), reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True))
     return COR_REQ_CONFIRM
@@ -1554,6 +1591,11 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
     req = db.get_correction_request(req_id)
     if not req or req['status'] != 'PENDING':
         await query.edit_message_text("❌ Bu so'rov allaqachon ko'rib chiqilgan.")
+        return
+    problem = _correction_times_problem(req['request_date'], req['actual_check_in'], req['actual_check_out'])
+    if problem:
+        # left PENDING so the admin can still reject it
+        await query.message.reply_text(f"⚠️ Tasdiqlab bo'lmaydi: {problem}")
         return
     db.update_correction_request_status(req_id, 'APPROVED')
     user_id = req['user_id']

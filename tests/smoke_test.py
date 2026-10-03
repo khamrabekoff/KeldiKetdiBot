@@ -121,7 +121,13 @@ check("6 сентября — выходной сам по себе", workdays.i
 check("7 сентября — рабочий", not workdays.is_rest_day(datetime.date(2026, 9, 7)))
 
 print("\n6. Подсказка ставки переработки")
-prompt, auto_keyboard = app._overtime_rate_prompt(500)
+# the prompt counts the current month's days; the holidays above are in September
+real_get_now = utils.get_now
+utils.get_now = lambda: datetime.datetime(2026, 9, 15, 12, 0)
+try:
+    prompt, auto_keyboard = app._overtime_rate_prompt(500)
+finally:
+    utils.get_now = real_get_now
 check("в подсказке 24 рабочих дня", '24 ish kuni' in prompt)
 check("в подсказке 540 минут", '540 daqiqa' in prompt)
 check("кнопка автоставки приложена",

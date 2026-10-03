@@ -39,6 +39,9 @@ SALARY = 500
 YEAR, MONTH = 2026, 9
 EMP = 555
 
+# The cards and the overtime prompt read the current month; pin it to the one filled below
+utils.get_now = lambda: datetime.datetime(YEAR, MONTH, 30, 19, 0)
+
 db.init_db()
 db.add_user(EMP, '998900000002', 'Alisher Karimov')
 db.update_rates(EMP, 'monthly', monthly_salary=SALARY)

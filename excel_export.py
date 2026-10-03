@@ -316,7 +316,7 @@ def create_employee_detailed_excel(user_id, days=30, filename=None):
         if not stats:
             return None
 
-        now = datetime.now()
+        now = utils.get_now()
         start_date = now.date() - timedelta(days=days)
 
         attendance = db.get_user_month_details(user_id, start_date)
