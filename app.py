@@ -142,9 +142,14 @@ class RetryingRequest(HTTPXRequest):
     Only connection-phase failures are retried. Those never reached Telegram,
     so re-sending cannot duplicate a message - a timeout is ambiguous about
     that and is deliberately left alone.
+
+    The refusals come in bursts of up to ~6 seconds (seen in the logs), so the
+    pauses double: 0.5 + 1 + 2 + 4 s. Three tries 1.5 s apart gave up mid-burst
+    and left an employee's advance unanswered. The whole window stays well
+    inside run_sync's 25 s budget.
     """
 
-    RETRIES = 3
+    RETRIES = 5
     RETRY_DELAY = 0.5
     RETRY_ON = ('ProxyError', 'ConnectError')
 
@@ -160,7 +165,7 @@ class RetryingRequest(HTTPXRequest):
                     f"proxy refused the call, retry {attempt}/{self.RETRIES - 1}: "
                     f"{type(e).__name__}: {e}"
                 )
-                await asyncio.sleep(self.RETRY_DELAY * attempt)
+                await asyncio.sleep(self.RETRY_DELAY * 2 ** (attempt - 1))
 
 
 async def _answer_quietly(query, text=None):

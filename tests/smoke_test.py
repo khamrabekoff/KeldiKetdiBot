@@ -223,6 +223,21 @@ try:
     code, _ = asyncio.run(request.do_request('https://api.telegram.org', 'POST'))
     check("вызов повторяется после 503", code == 200, f"попыток: {len(calls)}")
 
+    # 06.10: прокси отказал три раза подряд, и ответ на аванс так и не ушёл
+    calls.clear()
+
+    async def four_refusals(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) <= 4:
+            raise NetworkError("httpx.ProxyError: 503 Service Unavailable")
+        return 200, b'{"ok": true}'
+
+    app.HTTPXRequest.do_request = four_refusals
+    code, _ = asyncio.run(request.do_request('https://api.telegram.org', 'POST'))
+    check("переживает четыре отказа подряд", code == 200, f"попыток: {len(calls)}")
+    pauses = [app.RetryingRequest.RETRY_DELAY * 2 ** n for n in range(app.RetryingRequest.RETRIES - 1)]
+    check("всё окно повторов укладывается в бюджет run_sync", 5 < sum(pauses) < 25, f"{sum(pauses)} с")
+
     calls.clear()
 
     async def always_timeout(self, *args, **kwargs):
