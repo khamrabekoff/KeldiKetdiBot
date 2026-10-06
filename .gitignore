@@ -90,3 +90,6 @@ env/
 *.njsproj
 *.sln
 .*.swp
+
+# Local ops scripts (name the owner's accounts - never ship to client servers)
+ops/
