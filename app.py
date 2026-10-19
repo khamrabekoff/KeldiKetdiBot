@@ -182,6 +182,66 @@ async def _answer_quietly(query, text=None):
         logger.warning(f"answer_callback_query skipped: {type(e).__name__}: {e}")
 
 
+# ==================== MESSAGES SHARED BY THE ADMINS ====================
+# A request every admin gets used to stay live in every chat after one of
+# them dealt with it: the others couldn't tell it was done, and pressed again.
+
+async def _send_admin_copy(kind, ref, chat_id, text, keyboard):
+    """Send one admin their copy of a message with buttons, and remember it
+    so _close_admin_copies can rewrite it later."""
+    sent = await telegram_app.bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='HTML')
+    message_id = getattr(sent, 'message_id', None)
+    if message_id is not None:
+        db.save_admin_copy(kind, ref, chat_id, message_id, text)
+
+
+async def _send_to_admins(kind, ref, text, keyboard, skip=None):
+    for admin_id in db.get_admin_ids():
+        if admin_id == skip:
+            continue
+        try:
+            await _send_admin_copy(kind, ref, admin_id, text, keyboard)
+        except Exception as e:
+            logger.error(f"Failed to send {kind} {ref} to admin {admin_id}: {e}")
+
+
+def _verdict_line(verdict, admin_id):
+    admin = db.get_user(admin_id)
+    name = html.escape(admin['full_name']) if admin else f"ID {admin_id}"
+    return f"{verdict} — <b>{name}</b>"
+
+
+async def _close_admin_copies(kind, ref, verdict_line, query=None, pressed_text=None):
+    """Rewrite every admin's copy into its outcome, without the buttons.
+
+    `query` is the press that settled it. A copy sent before copies were
+    remembered isn't on record, so that one message is rewritten from
+    `pressed_text` (HTML), or failing that from its own plain text."""
+    copies = db.pop_admin_copies(kind, ref)
+    for copy in copies:
+        try:
+            await telegram_app.bot.edit_message_text(
+                chat_id=copy['chat_id'], message_id=copy['message_id'],
+                text=f"{copy['text']}\n\n{verdict_line}", parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Could not close {kind} {ref} for admin {copy['chat_id']}: {e}")
+    if query is None:
+        return
+    pressed = query.message
+    on_record = pressed is not None and any(
+        copy['chat_id'] == pressed.chat_id and copy['message_id'] == pressed.message_id
+        for copy in copies)
+    if not on_record:
+        try:
+            body = pressed_text
+            if body is None:
+                body = html.escape(pressed.text) if pressed is not None and pressed.text else ''
+            await query.edit_message_text(f"{body}\n\n{verdict_line}".strip(), parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Could not close the pressed {kind} {ref} message: {e}")
+
+
 def run_sync(coro, timeout=25):
     """Run one PTB coroutine on the long-lived loop, initializing on first use."""
     global _ptb_ready
@@ -341,12 +401,7 @@ async def _request_relink(update: Update, employee):
         InlineKeyboardButton("✅ Ulash", callback_data=f"relink:ok:{new_user.id}"),
         InlineKeyboardButton("❌ Rad etish", callback_data=f"relink:no:{new_user.id}"),
     ]])
-    for admin_id in db.get_admin_ids():
-        try:
-            await telegram_app.bot.send_message(
-                chat_id=admin_id, text=text, reply_markup=keyboard, parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Failed to send relink request to admin {admin_id}: {e}")
+    await _send_to_admins('relink', new_user.id, text, keyboard)
     await update.message.reply_text(msg.MSG_RELINK_SENT)
 
 
@@ -368,15 +423,13 @@ async def relink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     old_id = int(old_id)
     employee = db.get_user(old_id)
     db.update_setting(flag, '')
-    name = html.escape(employee['full_name']) if employee else f"ID {old_id}"
 
     if verdict == 'ok' and employee and db.relink_user(old_id, new_id):
         audit.log_employee_action(query.from_user.id, new_id, 'user_relinked',
                                   f"Yangi akkaunt: {old_id} → {new_id}")
         await _answer_quietly(query, "Ulandi")
-        await query.edit_message_text(
-            f"✅ <b>{name}</b> yangi akkauntga ulandi. Barcha ma'lumotlari saqlandi.",
-            parse_mode='HTML')
+        await _close_admin_copies('relink', new_id, _verdict_line(
+            "✅ Ulandi, barcha ma'lumotlari yangi akkauntga o'tdi", query.from_user.id), query)
         try:
             await telegram_app.bot.send_message(
                 chat_id=new_id,
@@ -388,14 +441,14 @@ async def relink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if verdict == 'ok':
         await _answer_quietly(query, "Ulab bo'lmadi")
-        await query.edit_message_text(
-            f"❌ <b>{name}</b> ni ulab bo'lmadi: xodim o'chirilgan yoki bu akkaunt "
-            "allaqachon botda bor.", parse_mode='HTML')
+        await _close_admin_copies('relink', new_id, _verdict_line(
+            "❌ Ulab bo'lmadi: xodim o'chirilgan yoki bu akkaunt allaqachon botda bor",
+            query.from_user.id), query)
         return
 
     await _answer_quietly(query, "Rad etildi")
-    await query.edit_message_text(f"❌ <b>{name}</b> uchun yangi akkaunt rad etildi.",
-                                  parse_mode='HTML')
+    await _close_admin_copies('relink', new_id, _verdict_line("❌ Rad etildi", query.from_user.id),
+                              query)
     try:
         await telegram_app.bot.send_message(chat_id=new_id, text=msg.MSG_NOT_AUTHORIZED)
     except Exception as e:
@@ -940,7 +993,8 @@ async def admin_correction_list_handler(update: Update, context: ContextTypes.DE
             [InlineKeyboardButton(msg.BTN_APPROVE, callback_data=f"approve_req_{req_id}")],
             [InlineKeyboardButton(msg.BTN_REJECT, callback_data=f"reject_req_{req_id}")]
         ]
-        await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='HTML')
+        await _send_admin_copy('correction', req_id, update.effective_user.id,
+                               msg_text, InlineKeyboardMarkup(buttons))
 
 
 # ==================== QUICK COMMANDS ====================
@@ -1725,11 +1779,6 @@ async def correction_request_confirm(update: Update, context: ContextTypes.DEFAU
         out_str = context.user_data['req_out']
         req_id = db.create_correction_request(user_id, date_str, in_str, out_str)
         await update.message.reply_text(msg.MSG_COR_REQ_SENT)
-        conn = db.get_connection()
-        c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE role='admin'")
-        admins = c.fetchall()
-        conn.close()
         user = db.get_user(user_id)
         name = user['full_name']
         d = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -1741,12 +1790,7 @@ async def correction_request_confirm(update: Update, context: ContextTypes.DEFAU
             current_status = f"{ci} - {co}"
         msg_text = msg.MSG_COR_REQ_ADMIN.format(name=name, date=date_str, in_time=in_str, out_time=out_str, current=current_status)
         buttons = [[InlineKeyboardButton(msg.BTN_APPROVE, callback_data=f"approve_req_{req_id}")], [InlineKeyboardButton(msg.BTN_REJECT, callback_data=f"reject_req_{req_id}")]]
-        for admin in admins:
-            try:
-                await telegram_app.bot.send_message(chat_id=admin['id'], text=msg_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"Failed to send correction request to admin: {e}")
-        user = db.get_user(user_id)
+        await _send_to_admins('correction', req_id, msg_text, InlineKeyboardMarkup(buttons))
         await show_main_menu(update, user)
         return ConversationHandler.END
     return COR_REQ_CONFIRM
@@ -1754,7 +1798,9 @@ async def correction_request_confirm(update: Update, context: ContextTypes.DEFAU
 
 async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return
     req_id = int(query.data.split("_")[-1])
     req = db.get_correction_request(req_id)
     if not req or req['status'] != 'PENDING':
@@ -1777,7 +1823,8 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
     wage, _, breakdown = utils.calculate_wage(in_time, out_time, rates)
     db.update_attendance_manual(user_id, target_date, in_time, out_time, wage, breakdown)
     audit.log_correction_approved(update.effective_user.id, user_id, date_str)
-    await query.edit_message_text(f"{query.message.text}\n\n✅ Tasdiqlandi!")
+    await _close_admin_copies('correction', req_id,
+                              _verdict_line("✅ Tasdiqlandi", query.from_user.id), query)
     try:
         await telegram_app.bot.send_message(chat_id=user_id, text=msg.MSG_REQ_APPROVED.format(date=date_str))
     except Exception as e:
@@ -1786,7 +1833,9 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def reject_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await _answer_quietly(query)
+    if not await check_admin(query.from_user.id):
+        return
     req_id = int(query.data.split("_")[-1])
     req = db.get_correction_request(req_id)
     if not req or req['status'] != 'PENDING':
@@ -1794,7 +1843,8 @@ async def reject_request_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     db.update_correction_request_status(req_id, 'REJECTED')
     audit.log_correction_rejected(update.effective_user.id, req['user_id'], req['request_date'])
-    await query.edit_message_text(f"{query.message.text}\n\n❌ Rad etildi.")
+    await _close_admin_copies('correction', req_id,
+                              _verdict_line("❌ Rad etildi", query.from_user.id), query)
     try:
         await telegram_app.bot.send_message(chat_id=req['user_id'], text=msg.MSG_REQ_REJECTED.format(date=req['request_date']))
     except Exception as e:
@@ -1926,20 +1976,8 @@ async def _notify_admins_of_advance(advance_id, skip=None):
     advance = db.get_advance(advance_id)
     if not advance:
         return
-    text = ui.advance_admin_card(advance)
-    keyboard = ui.advance_void_keyboard(advance_id)
-    conn = db.get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE role='admin'")
-    admins = [row for row in c.fetchall() if row['id'] != skip]
-    conn.close()
-    for admin in admins:
-        try:
-            await telegram_app.bot.send_message(
-                chat_id=admin['id'], text=text, reply_markup=keyboard, parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f"Failed to send advance {advance_id} to admin {admin['id']}: {e}")
+    await _send_to_admins('advance', advance_id, ui.advance_admin_card(advance),
+                          ui.advance_void_keyboard(advance_id), skip=skip)
 
 
 async def advance_void_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1968,9 +2006,14 @@ async def advance_void_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception as e:
             logger.error(f"Failed to tell employee about voided advance {advance_id}: {e}")
-    else:
-        await _answer_quietly(query, "Allaqachon bekor qilingan")
+        # `advance` was read before the void, so its card is the one the
+        # admins were sent
+        await _close_admin_copies('advance', advance_id,
+                                  _verdict_line("❌ Bekor qilindi", query.from_user.id),
+                                  query, pressed_text=ui.advance_admin_card(advance))
+        return
 
+    await _answer_quietly(query, "Allaqachon bekor qilingan")
     try:
         await query.edit_message_text(
             ui.advance_admin_card(db.get_advance(advance_id)), parse_mode='HTML'

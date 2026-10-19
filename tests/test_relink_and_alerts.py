@@ -90,6 +90,7 @@ class FakeQuery:
         self.data = data
         self.answers = []
         self.edits = []
+        self.message = None
 
     async def answer(self, text=None):
         self.answers.append(text)
@@ -207,7 +208,8 @@ check("запрос на исправление переехал",
       any(r['user_id'] == NEW for r in db.get_pending_correction_requests()))
 check("сотруднику пришло приветствие с клавиатурой",
       any(m['chat_id'] == NEW and 'Mohir' in m['text'] and m.get('reply_markup') for m in sent))
-check("админу показано «ulandi»", query.edits and 'ulandi' in query.edits[-1]['text'])
+check("админу показано «Ulandi — Abdulaziz Climadens»", query.edits
+      and 'Ulandi' in query.edits[-1]['text'] and 'Abdulaziz Climadens' in query.edits[-1]['text'])
 
 query = press(app.relink_callback, ADMIN2, f"relink:ok:{NEW}")
 check("второй админ: уже рассмотрено", "Allaqachon ko'rib chiqilgan" in query.answers)

@@ -80,6 +80,7 @@ class FakeQuery:
         self.data = data
         self.answers = []
         self.edits = []
+        self.message = None
 
     async def answer(self, text=None):
         self.answers.append(text)
@@ -248,7 +249,8 @@ check("сотрудник не может отменить", db.get_advance(firs
 query = press(ADMIN, f"adv:void:{first_id}")
 check("отменён", db.get_advance(first_id)['status'] == 'VOID')
 check("кто отменил, записано", db.get_advance(first_id)['voided_by'] == ADMIN)
-check("сообщение у админа помечено", query.edits and 'Bekor qilingan' in query.edits[0])
+check("сообщение у админа помечено: кто отменил",
+      query.edits and 'Bekor qilindi' in query.edits[0] and 'Boss' in query.edits[0])
 check("сотрудник узнал", [m for m in sent if m['chat_id'] == EMP and '$300.00' in m['text']])
 
 sent.clear()

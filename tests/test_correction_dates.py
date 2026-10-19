@@ -62,7 +62,8 @@ class FakeContext:
 
 
 class FakeQuery:
-    def __init__(self, data):
+    def __init__(self, data, user_id=None):
+        self.from_user = FakeUser(user_id)
         self.data = data
         self.edits = []
         self.message = FakeMessage('so\'rov')
@@ -76,7 +77,7 @@ class FakeQuery:
 
 class FakeCallbackUpdate:
     def __init__(self, user_id, data):
-        self.callback_query = FakeQuery(data)
+        self.callback_query = FakeQuery(data, user_id)
         self.effective_user = FakeUser(user_id)
 
 

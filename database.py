@@ -145,6 +145,20 @@ def init_db():
             )
         ''')
 
+        # Every copy of a message that went to several admins with buttons on
+        # it - a correction request, an advance. Once one admin acts, the
+        # other copies are rewritten to say so, instead of staying live.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS admin_copies (
+                kind TEXT,
+                ref INTEGER,
+                chat_id INTEGER,
+                message_id INTEGER,
+                text TEXT,
+                PRIMARY KEY (kind, ref, chat_id, message_id)
+            )
+        ''')
+
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance(user_id, date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_advances_user_date ON advances(user_id, date)')
@@ -487,6 +501,35 @@ def mark_open_shifts_reported(attendance_ids):
         conn.commit()
     finally:
         conn.close()
+
+
+def save_admin_copy(kind, ref, chat_id, message_id, text):
+    try:
+        conn = get_connection()
+        conn.execute('INSERT OR REPLACE INTO admin_copies (kind, ref, chat_id, message_id, text) '
+                     'VALUES (?, ?, ?, ?, ?)', (kind, ref, chat_id, message_id, text))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving admin copy {kind}/{ref}: {e}")
+
+
+def pop_admin_copies(kind, ref):
+    """The copies of one message, forgotten as they are handed back - each
+    gets rewritten once."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT chat_id, message_id, text FROM admin_copies WHERE kind = ? AND ref = ?',
+                  (kind, ref))
+        rows = c.fetchall()
+        c.execute('DELETE FROM admin_copies WHERE kind = ? AND ref = ?', (kind, ref))
+        conn.commit()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error reading admin copies {kind}/{ref}: {e}")
+        return []
 
 
 def get_admin_ids():
