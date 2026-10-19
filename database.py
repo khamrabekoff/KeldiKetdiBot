@@ -392,32 +392,38 @@ def count_pending_corrections():
         return 0
 
 
-def get_user_by_phone(phone):
+def same_phone(a, b):
+    """Whether two numbers are the same line. Two numbers that both carry a
+    country code (11+ digits) must match whole - the last 9 digits alone are
+    shared by numbers in different countries, e.g. +998 50 170 44 56 and
+    +7 950 170 44 56. A number stored without its country code can only be
+    compared on those 9 digits."""
+    a = ''.join(ch for ch in str(a or '') if ch.isdigit())
+    b = ''.join(ch for ch in str(b or '') if ch.isdigit())
+    if len(a) < 9 or len(b) < 9:
+        return False
+    if len(a) >= 11 and len(b) >= 11:
+        return a == b
+    return a[-9:] == b[-9:]
+
+
+def get_user_by_phone(phone, role=None):
+    """The user whose stored number is `phone` (see same_phone), or None.
+    Admins never match by number - theirs is the placeholder 'AdminPhone'."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE phone LIKE ?', (f'%{phone[-9:]}',))
-        user = c.fetchone()
+        sql = 'SELECT * FROM users WHERE phone LIKE ?'
+        params = [f'%{str(phone)[-9:]}']
+        if role:
+            sql += ' AND role = ?'
+            params.append(role)
+        c.execute(sql, params)
+        rows = c.fetchall()
         conn.close()
-        return user
+        return next((row for row in rows if same_phone(row['phone'], phone)), None)
     except Exception as e:
         logger.error(f"Error getting user by phone: {e}")
-        return None
-
-
-def get_employee_by_phone(phone):
-    """The employee whose stored number ends like `phone`, or None. Admins
-    are never matched - theirs is the placeholder 'AdminPhone'."""
-    try:
-        conn = get_connection()
-        c = conn.cursor()
-        c.execute("SELECT * FROM users WHERE role='employee' AND phone LIKE ?",
-                  (f'%{phone[-9:]}',))
-        user = c.fetchone()
-        conn.close()
-        return user
-    except Exception as e:
-        logger.error(f"Error getting employee by phone: {e}")
         return None
 
 
@@ -530,6 +536,23 @@ def pop_admin_copies(kind, ref):
     except Exception as e:
         logger.error(f"Error reading admin copies {kind}/{ref}: {e}")
         return []
+
+
+def cancel_pending_corrections(user_id):
+    """Mark one person's waiting correction requests CANCELLED; returns their
+    ids so the admins' copies can be closed."""
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id FROM correction_requests WHERE user_id = ? AND status = 'PENDING'",
+                  (user_id,))
+        ids = [row['id'] for row in c.fetchall()]
+        c.execute("UPDATE correction_requests SET status = 'CANCELLED' "
+                  "WHERE user_id = ? AND status = 'PENDING'", (user_id,))
+        conn.commit()
+        return ids
+    finally:
+        conn.close()
 
 
 def get_admin_ids():

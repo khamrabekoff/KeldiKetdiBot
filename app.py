@@ -197,13 +197,17 @@ async def _send_admin_copy(kind, ref, chat_id, text, keyboard):
 
 
 async def _send_to_admins(kind, ref, text, keyboard, skip=None):
+    """Returns how many admins got their copy."""
+    delivered = 0
     for admin_id in db.get_admin_ids():
         if admin_id == skip:
             continue
         try:
             await _send_admin_copy(kind, ref, admin_id, text, keyboard)
+            delivered += 1
         except Exception as e:
             logger.error(f"Failed to send {kind} {ref} to admin {admin_id}: {e}")
+    return delivered
 
 
 def _verdict_line(verdict, admin_id):
@@ -212,34 +216,42 @@ def _verdict_line(verdict, admin_id):
     return f"{verdict} — <b>{name}</b>"
 
 
-async def _close_admin_copies(kind, ref, verdict_line, query=None, pressed_text=None):
+async def _close_admin_copies(kind, ref, verdict_line, query=None, body=None):
     """Rewrite every admin's copy into its outcome, without the buttons.
 
-    `query` is the press that settled it. A copy sent before copies were
-    remembered isn't on record, so that one message is rewritten from
-    `pressed_text` (HTML), or failing that from its own plain text."""
+    `body` (HTML) replaces the text the copies were sent with, for a message
+    whose content changed along with the outcome. `query` is the press that
+    settled it: a copy sent before copies were remembered isn't on record,
+    so that one message is rewritten from `body` or its own plain text.
+
+    Telegram hands an old message to a button press as an
+    InaccessibleMessage - chat and message_id only, no text - so nothing
+    here may assume more than that."""
     copies = db.pop_admin_copies(kind, ref)
     for copy in copies:
         try:
             await telegram_app.bot.edit_message_text(
                 chat_id=copy['chat_id'], message_id=copy['message_id'],
-                text=f"{copy['text']}\n\n{verdict_line}", parse_mode='HTML')
+                text=f"{copy['text'] if body is None else body}\n\n{verdict_line}",
+                parse_mode='HTML')
         except Exception as e:
             logger.warning(f"Could not close {kind} {ref} for admin {copy['chat_id']}: {e}")
     if query is None:
         return
     pressed = query.message
-    on_record = pressed is not None and any(
-        copy['chat_id'] == pressed.chat_id and copy['message_id'] == pressed.message_id
+    chat = getattr(pressed, 'chat', None)
+    on_record = chat is not None and any(
+        copy['chat_id'] == chat.id and copy['message_id'] == pressed.message_id
         for copy in copies)
-    if not on_record:
-        try:
-            body = pressed_text
-            if body is None:
-                body = html.escape(pressed.text) if pressed is not None and pressed.text else ''
-            await query.edit_message_text(f"{body}\n\n{verdict_line}".strip(), parse_mode='HTML')
-        except Exception as e:
-            logger.warning(f"Could not close the pressed {kind} {ref} message: {e}")
+    if on_record:
+        return
+    text = body
+    if text is None:
+        text = html.escape(getattr(pressed, 'text', None) or '')
+    try:
+        await query.edit_message_text(f"{text}\n\n{verdict_line}".strip(), parse_mode='HTML')
+    except Exception as e:
+        logger.warning(f"Could not close the pressed {kind} {ref} message: {e}")
 
 
 def run_sync(coro, timeout=25):
@@ -363,9 +375,9 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, new_user)
         return
 
-    employee = db.get_employee_by_phone(phone)
+    employee = db.get_user_by_phone(phone, role='employee')
     if employee:
-        await _request_relink(update, employee)
+        await _request_relink(update, employee, phone)
         return
     await update.message.reply_text(msg.MSG_NOT_AUTHORIZED)
 
@@ -374,7 +386,7 @@ def _relink_flag(new_id):
     return f"relink_request_{new_id}"
 
 
-async def _request_relink(update: Update, employee):
+async def _request_relink(update: Update, employee, shared_phone):
     """The number belongs to an employee, but on another Telegram account -
     they deleted the old one, or it was taken from them. Moving the history
     across is up to an admin: whoever holds the number now is not
@@ -384,13 +396,13 @@ async def _request_relink(update: Update, employee):
     if settings.get_flag(flag) == str(employee['id']):
         await update.message.reply_text(msg.MSG_RELINK_WAIT)
         return
-    settings.set_flag(flag, employee['id'])
 
     username = f" (@{new_user.username})" if new_user.username else ""
     text = (
         "🔄 <b>Xodim yangi Telegram akkauntdan kirmoqchi</b>\n\n"
         f"👤 Xodim: <b>{html.escape(employee['full_name'])}</b>\n"
-        f"📱 Raqam: <code>+{html.escape(str(employee['phone']).lstrip('+'))}</code>\n"
+        f"📱 Xodim raqami: <code>+{html.escape(str(employee['phone']).lstrip('+'))}</code>\n"
+        f"📲 Yuborgan raqami: <code>+{html.escape(str(shared_phone).lstrip('+'))}</code>\n"
         f"🆕 Yangi akkaunt: {html.escape(new_user.full_name or '')}{html.escape(username)}\n"
         f"<code>Eski ID: {employee['id']} → Yangi ID: {new_user.id}</code>\n\n"
         "Tasdiqlasangiz, uning barcha ish kunlari, avanslari va stavkasi yangi "
@@ -401,7 +413,12 @@ async def _request_relink(update: Update, employee):
         InlineKeyboardButton("✅ Ulash", callback_data=f"relink:ok:{new_user.id}"),
         InlineKeyboardButton("❌ Rad etish", callback_data=f"relink:no:{new_user.id}"),
     ]])
-    await _send_to_admins('relink', new_user.id, text, keyboard)
+    # Pending only once someone has it: a request no admin received would
+    # otherwise leave the person told to wait for an answer that can't come.
+    if not await _send_to_admins('relink', new_user.id, text, keyboard):
+        await update.message.reply_text(msg.MSG_RELINK_RETRY)
+        return
+    settings.set_flag(flag, employee['id'])
     await update.message.reply_text(msg.MSG_RELINK_SENT)
 
 
@@ -444,6 +461,10 @@ async def relink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _close_admin_copies('relink', new_id, _verdict_line(
             "❌ Ulab bo'lmadi: xodim o'chirilgan yoki bu akkaunt allaqachon botda bor",
             query.from_user.id), query)
+        try:
+            await telegram_app.bot.send_message(chat_id=new_id, text=msg.MSG_RELINK_FAILED)
+        except Exception as e:
+            logger.warning(f"Could not tell {new_id} the relink failed: {e}")
         return
 
     await _answer_quietly(query, "Rad etildi")
@@ -691,6 +712,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return ConversationHandler.END
 
         elif data.startswith("edit_"):
+            # Callback data is whatever the client sends, not necessarily a
+            # button it was shown - an employee could otherwise open this
+            # menu for themselves and set their own rate.
+            if not await check_admin(query.from_user.id):
+                return ConversationHandler.END
             user_id = int(data.split("_")[1])
             context.user_data['edit_user_id'] = user_id
 
@@ -734,8 +760,15 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
                               f"O'chirildi: {employee['full_name']}")
     db.delete_user(user_id)
     await _answer_quietly(query, "O'chirildi")
-    await query.edit_message_text(text=f"✅ Xodim o'chirildi.\n\n{summary}", parse_mode='HTML')
 
+    # Their open requests die with them: approved later, one would write a
+    # day for a person who no longer exists.
+    gone = _verdict_line("🗑 Xodim o'chirildi", query.from_user.id)
+    for req_id in db.cancel_pending_corrections(user_id):
+        await _close_admin_copies('correction', req_id, gone)
+
+    # The other admins first: if the screen edit below fails, this notice is
+    # still the record of what the person was owed.
     admin = db.get_user(query.from_user.id)
     notice = (f"🗑 <b>Xodim o'chirildi</b> — {html.escape(admin['full_name'])} tomonidan\n\n"
               f"{summary}")
@@ -746,11 +779,17 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
             await telegram_app.bot.send_message(chat_id=admin_id, text=notice, parse_mode='HTML')
         except Exception as e:
             logger.error(f"Failed to tell admin {admin_id} about deleting {user_id}: {e}")
+    try:
+        await query.edit_message_text(text=f"✅ Xodim o'chirildi.\n\n{summary}", parse_mode='HTML')
+    except Exception as e:
+        logger.warning(f"Could not redraw the delete screen for {user_id}: {e}")
 
 
 async def employee_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await check_admin(query.from_user.id):
+        return ConversationHandler.END
     data = query.data
 
     if data.startswith("act_rates_"):
@@ -987,7 +1026,8 @@ async def admin_correction_list_handler(update: Update, context: ContextTypes.DE
             current_status = f"{ci} - {co}"
 
         msg_text = msg.MSG_COR_REQ_ADMIN.format(
-            name=name, date=date_str, in_time=in_time, out_time=out_time, current=current_status
+            name=html.escape(name), date=date_str, in_time=in_time, out_time=out_time,
+            current=current_status
         )
         buttons = [
             [InlineKeyboardButton(msg.BTN_APPROVE, callback_data=f"approve_req_{req_id}")],
@@ -1788,7 +1828,7 @@ async def correction_request_confirm(update: Update, context: ContextTypes.DEFAU
             ci = att['check_in'].strftime("%H:%M")
             co = att['check_out'].strftime("%H:%M") if att['check_out'] else "?"
             current_status = f"{ci} - {co}"
-        msg_text = msg.MSG_COR_REQ_ADMIN.format(name=name, date=date_str, in_time=in_str, out_time=out_str, current=current_status)
+        msg_text = msg.MSG_COR_REQ_ADMIN.format(name=html.escape(name), date=date_str, in_time=in_str, out_time=out_str, current=current_status)
         buttons = [[InlineKeyboardButton(msg.BTN_APPROVE, callback_data=f"approve_req_{req_id}")], [InlineKeyboardButton(msg.BTN_REJECT, callback_data=f"reject_req_{req_id}")]]
         await _send_to_admins('correction', req_id, msg_text, InlineKeyboardMarkup(buttons))
         await show_main_menu(update, user)
@@ -1805,6 +1845,12 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
     req = db.get_correction_request(req_id)
     if not req or req['status'] != 'PENDING':
         await query.edit_message_text("❌ Bu so'rov allaqachon ko'rib chiqilgan.")
+        return
+    if not db.get_user(req['user_id']):
+        # deleted before cancel-on-delete existed
+        db.update_correction_request_status(req_id, 'CANCELLED')
+        await _close_admin_copies('correction', req_id,
+                                  _verdict_line("🗑 Xodim o'chirilgan", query.from_user.id), query)
         return
     problem = _correction_times_problem(req['request_date'], req['actual_check_in'], req['actual_check_out'])
     if problem:
@@ -2006,11 +2052,12 @@ async def advance_void_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception as e:
             logger.error(f"Failed to tell employee about voided advance {advance_id}: {e}")
-        # `advance` was read before the void, so its card is the one the
-        # admins were sent
+        # Redrawn rather than the text sent: its month total still counted
+        # the advance just voided. The verdict line says who voided it.
+        card = ui.advance_admin_card(db.get_advance(advance_id), with_status=False)
         await _close_admin_copies('advance', advance_id,
                                   _verdict_line("❌ Bekor qilindi", query.from_user.id),
-                                  query, pressed_text=ui.advance_admin_card(advance))
+                                  query, body=card)
         return
 
     await _answer_quietly(query, "Allaqachon bekor qilingan")
@@ -2253,7 +2300,7 @@ def _maybe_send_due_reminders():
         now = utils.get_now()
         today = now.date()
 
-        if settings.get_flag(OPEN_SHIFTS_FLAG) != today.isoformat():
+        if _open_shifts_due(now):
             run_sync(_alert_open_shifts(), timeout=60)
 
         if now >= datetime.combine(today, settings.get_time('work_end')):
@@ -2379,22 +2426,45 @@ EVENING_REMINDER_MSG = "🌙 Ish kuni tugadimi? Ishdan ketgan bo'lsangiz, 'Ketdi
 OPEN_SHIFTS_FLAG = "open_shifts_checked_on"
 
 
+def _open_shifts_due(now):
+    """Once a day, and not before the morning: the first update after
+    midnight would otherwise ping everyone at night, and catch someone still
+    at work as "forgot to leave"."""
+    start = datetime.combine(now.date(), settings.get_time('work_start'))
+    return (settings.get_flag(OPEN_SHIFTS_FLAG) != now.date().isoformat()
+            and now >= start - MORNING_LEAD)
+
+
 async def _alert_open_shifts():
-    """Tell the employee and the admins about days left open overnight.
+    """Tell the admins, then the employee, about days left open overnight.
 
     A day with no «Ketdim» earns nothing, and nobody noticed: Mohir had
     sixteen of them before anyone looked. Each day is reported once
-    (attendance.open_alerted). The employee only hears about days they can
-    still fix themselves - older ones go to the admins alone, so a first run
-    over months of backlog doesn't bury anyone in stale warnings."""
+    (attendance.open_alerted), and only once an admin has the digest -
+    otherwise it is all tried again tomorrow, the employees included, so
+    they hear about a day exactly once too. The employee only hears about
+    days they can still fix themselves; older ones go to the admins alone."""
     today = utils.get_now().date()
     settings.set_flag(OPEN_SHIFTS_FLAG, today.isoformat())
     rows = db.get_unreported_open_shifts(today)
     if not rows:
         return 0
     bot = telegram_app.bot
-    oldest_fixable = today - timedelta(days=CORRECTION_WINDOW_DAYS - 1)
 
+    delivered = 0
+    for admin_id in db.get_admin_ids():
+        try:
+            for text in ui.open_shifts_admin_texts(rows):
+                await bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML')
+            delivered += 1
+        except Exception as e:
+            logger.warning(f"Open-shift digest failed for admin {admin_id}: {e}")
+    if not delivered:
+        logger.warning(f"⚠️ Open shifts not reported: no admin got the digest ({len(rows)} days)")
+        return 0
+    db.mark_open_shifts_reported([r['id'] for r in rows])
+
+    oldest_fixable = today - timedelta(days=CORRECTION_WINDOW_DAYS - 1)
     by_employee = {}
     for r in rows:
         by_employee.setdefault(r['user_id'], []).append(r)
@@ -2407,17 +2477,6 @@ async def _alert_open_shifts():
                                    text=ui.open_shifts_employee_text(recent))
         except Exception as e:
             logger.warning(f"Open-shift alert failed for employee {user_id}: {e}")
-
-    text = ui.open_shifts_admin_text(rows)
-    delivered = 0
-    for admin_id in db.get_admin_ids():
-        try:
-            await bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML')
-            delivered += 1
-        except Exception as e:
-            logger.warning(f"Open-shift digest failed for admin {admin_id}: {e}")
-    if delivered:
-        db.mark_open_shifts_reported([r['id'] for r in rows])
     logger.info(f"⚠️ Open shifts reported: {len(rows)} days, {delivered} admins")
     return len(rows)
 
@@ -2661,7 +2720,7 @@ def cron_reminders(secret):
     dry = request.args.get('dry') in ('1', 'true', 'yes')
     try:
         kind, result, total, digest = run_sync(_send_reminders_job(kind, dry), timeout=120)
-        if not dry and settings.get_flag(OPEN_SHIFTS_FLAG) != utils.get_now().date().isoformat():
+        if not dry and _open_shifts_due(utils.get_now()):
             run_sync(_alert_open_shifts(), timeout=60)
         if dry:
             return jsonify({

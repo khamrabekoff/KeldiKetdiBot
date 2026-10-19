@@ -508,21 +508,38 @@ def employee_delete_card(emp_id):
     return text.rstrip('\n')
 
 
-def open_shifts_admin_text(rows):
-    """Digest of days left open overnight, grouped by employee."""
-    text = ("⚠️ <b>«Ketdim» bosilmagan kunlar</b>\n"
-            "<i>Bu kunlar uchun ish haqi hisoblanmadi.</i>\n")
+# Telegram refuses a message over 4096 characters. Measured on the HTML
+# source, which is always longer than what Telegram counts.
+MESSAGE_LIMIT = 3800
+
+
+def open_shifts_admin_texts(rows):
+    """Digest of days left open overnight, grouped by employee (by id - two
+    people may share a name), split into as many messages as it takes: a
+    first run over months of backlog does not fit in one."""
+    header = ("⚠️ <b>«Ketdim» bosilmagan kunlar</b>\n"
+              "<i>Bu kunlar uchun ish haqi hisoblanmadi.</i>\n")
+    footer = ("\nTuzatish: Hodimlar → xodim → 📝 Vaqt (⚠️ belgili kunlar).\n"
+              "<i>Yaqin kunlar uchun xodimning o'zi ham «📝 Tuzatish» so'rovini yuborishi mumkin.</i>")
     by_person = {}
     for r in rows:
-        by_person.setdefault(r['full_name'], []).append(r)
-    for name, days in by_person.items():
-        text += f"\n👤 <b>{html.escape(name)}</b>\n"
+        by_person.setdefault(r['user_id'], []).append(r)
+
+    lines = []
+    for days in by_person.values():
+        lines.append(f"\n👤 <b>{html.escape(days[0]['full_name'])}</b>\n")
         for r in days:
             came = r['check_in'].strftime('%H:%M') if r['check_in'] else '--:--'
-            text += f"<code>  {r['date'].strftime('%d.%m.%y')}  keldi {came}, ketmadi</code>\n"
-    text += ("\nTuzatish: Hodimlar → xodim → 📝 Vaqt (⚠️ belgili kunlar).\n"
-             "<i>Yaqin kunlar uchun xodimning o'zi ham «📝 Tuzatish» so'rovini yuborishi mumkin.</i>")
-    return text
+            lines.append(f"<code>  {r['date'].strftime('%d.%m.%y')}  keldi {came}, ketmadi</code>\n")
+
+    messages, text = [], header
+    for line in lines:
+        if len(text) + len(line) + len(footer) > MESSAGE_LIMIT:
+            messages.append(text)
+            text = ""
+        text += line
+    messages.append(text + footer)
+    return messages
 
 
 def open_shifts_employee_text(rows):
@@ -960,9 +977,10 @@ def advance_saved_note(amount):
     return f"✅ <b>Avans qayd etildi: {fmt_money(amount)}</b>\n<i>Admin xabardor qilindi.</i>"
 
 
-def advance_admin_card(advance):
+def advance_admin_card(advance, with_status=True):
     """What admins get the moment an employee records an advance, and what
-    that message becomes once one of them voids it."""
+    that message becomes once one of them voids it. `with_status=False`
+    leaves out the voided mark, for a caller that adds its own line."""
     created = advance['created_at']
     month_total = sum(a['amount'] for a in month_advances(advance['user_id'], advance['date']))
     text = (
@@ -977,7 +995,7 @@ def advance_admin_card(advance):
     if advance['created_by']:
         text += f"✍️ Admin yozdi: <b>{esc(advance['created_by_name'] or '?')}</b>\n"
     text += f"\n<i>{fmt_month(created)} jami avans: {fmt_money(month_total)}</i>"
-    if advance['status'] != 'ACTIVE':
+    if with_status and advance['status'] != 'ACTIVE':
         text += "\n\n❌ <b>Bekor qilingan</b>"
     return text
 

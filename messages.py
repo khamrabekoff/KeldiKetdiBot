@@ -7,6 +7,8 @@ MSG_OWN_CONTACT_ONLY = "Iltimos, o'z raqamingizni pastdagi «📱 Telefon raqamn
 MSG_RELINK_SENT = ("Bu raqam xodimlar ro'yxatida bor, lekin boshqa Telegram akkauntga ulangan.\n"
                    "Rahbarga so'rov yuborildi — u tasdiqlagach, bot sizga xabar beradi.")
 MSG_RELINK_WAIT = "So'rovingiz rahbarga yuborilgan. Tasdiqlashini kuting."
+MSG_RELINK_RETRY = "So'rovni rahbarga yuborib bo'lmadi. Birozdan keyin raqamingizni qayta yuboring."
+MSG_RELINK_FAILED = "Akkauntingizni ulab bo'lmadi. Iltimos, rahbar bilan bog'laning."
 MSG_AUTH_SUCCESS = "Xush kelibsiz, {name}!"
 MSG_ALREADY_REGISTERED = "Siz allaqachon ro'yxatdan o'tgansiz."
 MSG_ADMIN_WELCOME = "Xush kelibsiz, Administrator! Buyruq kuting."
