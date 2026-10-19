@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.request import HTTPXRequest
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationHandlerStop, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, TypeHandler, filters, ContextTypes
 
 import openpyxl
 from openpyxl.styles import Font
@@ -302,6 +302,31 @@ telegram_app = None
 async def check_admin(user_id):
     user = db.get_user(user_id)
     return user is not None and user['role'] == 'admin'
+
+
+async def turn_away_deleted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Runs before every other handler. A deleted employee keeps their row,
+    so the reports can still show and settle what they earned - but not the
+    bot: «Keldim», /in and the correction flow never ask who is calling, and
+    would write days for them. /start and the contact button still get
+    through: once an admin invites the number again, sharing it is how they
+    come back (see db.promote_pending_to_user)."""
+    person = update.effective_user
+    if person is None:
+        return
+    row = db.get_user(person.id, include_inactive=True)
+    if row is None or row['is_active'] != 0:
+        return
+    message = getattr(update, 'message', None)
+    if message is not None and (getattr(message, 'contact', None)
+                                or (message.text or '').startswith('/start')):
+        return
+    query = getattr(update, 'callback_query', None)
+    if query is not None:
+        await _answer_quietly(query)
+    elif message is not None:
+        await message.reply_text(msg.MSG_NOT_AUTHORIZED, reply_markup=ReplyKeyboardRemove())
+    raise ApplicationHandlerStop
 
 
 async def get_main_menu_markup(role, user_id=None):
@@ -693,8 +718,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         data = query.data
         if data.startswith("del_"):
-            # Ask first: deleting takes the person out of every report, so
-            # whatever they are still owed has to be seen before it vanishes.
+            # Ask first, with what the person is still owed in front of the admin.
             user_id = int(data.split("_")[1])
             if not await check_admin(query.from_user.id):
                 return ConversationHandler.END
@@ -702,7 +726,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text(text="❌ Xodim topilmadi.")
                 return ConversationHandler.END
             await query.edit_message_text(
-                text=ui.employee_delete_card(user_id) + "\n\n<b>Rostdan o'chirilsinmi?</b>",
+                text=(ui.employee_delete_card(user_id) + "\n\n" + ui.DELETE_KEEPS_HISTORY
+                      + "\n\n<b>Rostdan o'chirilsinmi?</b>"),
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🗑 Ha, o'chirish", callback_data=f"delok:{user_id}"),
                     InlineKeyboardButton("↩️ Yo'q", callback_data=f"edit_{user_id}"),
@@ -718,6 +743,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             if not await check_admin(query.from_user.id):
                 return ConversationHandler.END
             user_id = int(data.split("_")[1])
+            if not db.get_user(user_id):
+                # a card left on screen from before the person was deleted
+                await query.edit_message_text(text="❌ Xodim topilmadi.")
+                return ConversationHandler.END
             context.user_data['edit_user_id'] = user_id
 
             buttons = [
@@ -742,8 +771,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """The admin confirmed the delete. The other admins hear about it along
-    with what the person was still owed - after this the reports no longer
-    show them, so that message is the last place the balance appears."""
+    with what the person was still owed. Only their access goes: the reports,
+    the exports and the payment screen keep them, marked (o'chirilgan), so
+    that balance can still be paid and the month settled."""
     query = update.callback_query
     if not await check_admin(query.from_user.id):
         await _answer_quietly(query)
@@ -755,14 +785,13 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(text="❌ Xodim topilmadi.")
         return
     summary = ui.employee_delete_card(user_id)
-    # logged first, while the name can still be looked up
     audit.log_employee_action(query.from_user.id, user_id, 'user_deleted',
                               f"O'chirildi: {employee['full_name']}")
-    db.delete_user(user_id)
+    db.deactivate_user(user_id)
     await _answer_quietly(query, "O'chirildi")
 
     # Their open requests die with them: approved later, one would write a
-    # day for a person who no longer exists.
+    # day for a person who no longer works here.
     gone = _verdict_line("🗑 Xodim o'chirildi", query.from_user.id)
     for req_id in db.cancel_pending_corrections(user_id):
         await _close_admin_copies('correction', req_id, gone)
@@ -771,7 +800,7 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
     # still the record of what the person was owed.
     admin = db.get_user(query.from_user.id)
     notice = (f"🗑 <b>Xodim o'chirildi</b> — {html.escape(admin['full_name'])} tomonidan\n\n"
-              f"{summary}")
+              f"{summary}\n\n{ui.DELETE_KEEPS_HISTORY}")
     for admin_id in db.get_admin_ids():
         if admin_id == query.from_user.id:
             continue
@@ -780,7 +809,8 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"Failed to tell admin {admin_id} about deleting {user_id}: {e}")
     try:
-        await query.edit_message_text(text=f"✅ Xodim o'chirildi.\n\n{summary}", parse_mode='HTML')
+        await query.edit_message_text(
+            text=f"✅ Xodim o'chirildi.\n\n{summary}\n\n{ui.DELETE_KEEPS_HISTORY}", parse_mode='HTML')
     except Exception as e:
         logger.warning(f"Could not redraw the delete screen for {user_id}: {e}")
 
@@ -1428,8 +1458,8 @@ async def cmd_employee_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         conn = db.get_connection()
         c = conn.cursor()
-        c.execute("SELECT id, full_name FROM users WHERE role='employee' AND LOWER(full_name) LIKE ?",
-                  (f"%{search_name}%",))
+        c.execute(f"SELECT id, full_name FROM users WHERE role='employee' AND {db.ACTIVE} "
+                  "AND LOWER(full_name) LIKE ?", (f"%{search_name}%",))
         matches = c.fetchall()
         conn.close()
 
@@ -2186,7 +2216,8 @@ async def payment_sum_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_admin(query.from_user.id):
         return ConversationHandler.END
     _, _, user_id, ym = query.data.split(':')
-    employee = db.get_user(int(user_id))
+    # a deleted employee's balance is still paid from here
+    employee = db.get_user(int(user_id), include_inactive=True)
     if not employee:
         await query.message.reply_text("❌ Xodim topilmadi.")
         return ConversationHandler.END
@@ -2484,7 +2515,7 @@ async def _alert_open_shifts():
 def _get_all_employees():
     conn = db.get_connection()
     c = conn.cursor()
-    c.execute("SELECT id, full_name FROM users WHERE role='employee'")
+    c.execute(f"SELECT id, full_name FROM users WHERE role='employee' AND {db.ACTIVE}")
     employees = c.fetchall()
     conn.close()
     return employees
@@ -2623,9 +2654,10 @@ async def _broadcast(bot, text, audience='employees'):
     conn = db.get_connection()
     c = conn.cursor()
     if audience == 'all':
-        c.execute("SELECT id, full_name FROM users ORDER BY full_name")
+        c.execute(f"SELECT id, full_name FROM users WHERE {db.ACTIVE} ORDER BY full_name")
     else:
-        c.execute("SELECT id, full_name FROM users WHERE role='employee' ORDER BY full_name")
+        c.execute(f"SELECT id, full_name FROM users WHERE role='employee' AND {db.ACTIVE} "
+                  "ORDER BY full_name")
     people = c.fetchall()
     conn.close()
 
@@ -2745,6 +2777,9 @@ def create_application():
                       .token(BOT_TOKEN)
                       .request(RetryingRequest(connection_pool_size=256))
                       .build())
+
+        # Before everything else, in its own group
+        app_config.add_handler(TypeHandler(Update, turn_away_deleted), group=-1)
 
         # Start command
         app_config.add_handler(CommandHandler("start", start))

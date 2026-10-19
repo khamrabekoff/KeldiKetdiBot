@@ -52,7 +52,7 @@ def log_employee_action(admin_id, employee_id, action_type, description, details
     """Log an action on an employee"""
     try:
         admin = db.get_user(admin_id)
-        employee = db.get_user(employee_id)
+        employee = db.get_user(employee_id, include_inactive=True)  # paid after deletion
 
         admin_name = admin['full_name'] if admin else f"User {admin_id}"
         employee_name = employee['full_name'] if employee else f"User {employee_id}"

@@ -199,8 +199,8 @@ def add_user(telegram_id, phone, full_name, role='employee'):
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO users (id, phone, full_name, role) VALUES (?, ?, ?, ?)',
-                  (telegram_id, phone, full_name, role))
+        c.execute('INSERT OR REPLACE INTO users (id, phone, full_name, role, is_active) '
+                  'VALUES (?, ?, ?, ?, 1)', (telegram_id, phone, full_name, role))
         if role == 'employee':
             c.execute(
                 'INSERT OR IGNORE INTO rates (user_id, salary_type, rate_n, rate_m, rate_k, rate_overtime, monthly_salary, overtime_hourly_rate, rate_per_minute) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0)',
@@ -285,13 +285,18 @@ def delete_pending_user(phone):
 
 
 def promote_pending_to_user(telegram_id, full_phone, full_name, pending_row):
+    """Also how a deleted employee comes back: invited again and opening the
+    bot from the same Telegram account, their row is made active again under
+    the same id, so their old days, advances and payments are theirs again.
+    The new invitation's rate replaces the old one. From a different account
+    they start as a new record - the old one stays deleted, history and all."""
     try:
         conn = get_connection()
         c = conn.cursor()
         keys = pending_row.keys()
 
-        c.execute('INSERT OR REPLACE INTO users (id, phone, full_name, role) VALUES (?, ?, ?, ?)',
-                  (telegram_id, full_phone, full_name, 'employee'))
+        c.execute('INSERT OR REPLACE INTO users (id, phone, full_name, role, is_active) '
+                  'VALUES (?, ?, ?, ?, 1)', (telegram_id, full_phone, full_name, 'employee'))
 
         salary_type = pending_row['salary_type'] if 'salary_type' in keys else 'tariff'
         monthly_salary = pending_row['monthly_salary'] if 'monthly_salary' in keys else 0
@@ -319,11 +324,27 @@ def promote_pending_to_user(telegram_id, full_phone, full_name, pending_row):
         raise
 
 
-def get_user(telegram_id):
+# A deleted employee keeps their users row (is_active = 0): every report
+# joins on it, and without it what they earned, took and were paid vanished.
+ACTIVE = 'COALESCE(is_active, 1) = 1'
+
+# The report queries' name column: a deleted person is still listed, marked,
+# so the balance they left can be seen and paid.
+REPORT_NAME = ("u.full_name || CASE WHEN COALESCE(u.is_active, 1) = 0 "
+               "THEN ' (o''chirilgan)' ELSE '' END AS full_name, "
+               "COALESCE(u.is_active, 1) AS is_active")
+
+
+def get_user(telegram_id, include_inactive=False):
+    """The user, or None. A deleted employee counts as None unless asked
+    for - every caller that decides who may do something relies on that."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE id = ?', (telegram_id,))
+        sql = 'SELECT * FROM users WHERE id = ?'
+        if not include_inactive:
+            sql += f' AND {ACTIVE}'
+        c.execute(sql, (telegram_id,))
         user = c.fetchone()
         conn.close()
         return user
@@ -366,11 +387,12 @@ def get_db_stats():
 
 
 def get_employees():
-    """All employees, alphabetically."""
+    """All current employees, alphabetically."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute("SELECT id, full_name, phone FROM users WHERE role='employee' ORDER BY full_name")
+        c.execute(f"SELECT id, full_name, phone FROM users WHERE role='employee' AND {ACTIVE} "
+                  "ORDER BY full_name")
         rows = c.fetchall()
         conn.close()
         return rows
@@ -408,12 +430,12 @@ def same_phone(a, b):
 
 
 def get_user_by_phone(phone, role=None):
-    """The user whose stored number is `phone` (see same_phone), or None.
-    Admins never match by number - theirs is the placeholder 'AdminPhone'."""
+    """The current user whose stored number is `phone` (see same_phone), or
+    None. Admins never match by number - theirs is the placeholder 'AdminPhone'."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        sql = 'SELECT * FROM users WHERE phone LIKE ?'
+        sql = f'SELECT * FROM users WHERE phone LIKE ? AND {ACTIVE}'
         params = [f'%{str(phone)[-9:]}']
         if role:
             sql += ' AND role = ?'
@@ -469,7 +491,8 @@ def get_unreported_open_shifts(before_day):
             SELECT a.id, a.user_id, u.full_name, a.date, a.check_in
             FROM attendance a
             JOIN users u ON a.user_id = u.id
-            WHERE u.role = 'employee' AND a.check_out IS NULL
+            WHERE u.role = 'employee' AND COALESCE(u.is_active, 1) = 1
+              AND a.check_out IS NULL
               AND a.date < ? AND COALESCE(a.open_alerted, 0) = 0
             ORDER BY u.full_name, a.date
         ''', (before_day,))
@@ -568,16 +591,18 @@ def get_admin_ids():
         return []
 
 
-def delete_user(user_id):
+def deactivate_user(user_id):
+    """Delete an employee from the bot, not from the books: their row and
+    rate stay for the reports, but get_user no longer finds them, so they
+    cannot sign in or be picked anywhere current staff are listed."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute('DELETE FROM rates WHERE user_id = ?', (user_id,))
-        c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        c.execute('UPDATE users SET is_active = 0 WHERE id = ?', (user_id,))
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Error deleting user {user_id}: {e}")
+        logger.error(f"Error deactivating user {user_id}: {e}")
         raise
 
 
@@ -735,7 +760,7 @@ def get_month_attendance_details(start_date, end_date=None):
         conn = get_connection()
         c = conn.cursor()
         sql = '''
-            SELECT a.user_id, u.full_name, a.date, a.check_in, a.check_out, a.total_wage,
+            SELECT a.user_id, {name}, a.date, a.check_in, a.check_out, a.total_wage,
                    a.base_wage, a.overtime_wage,
                    r.salary_type, r.rate_n, r.rate_m, r.rate_k, r.rate_overtime,
                    r.monthly_salary, r.overtime_hourly_rate, r.rate_per_minute,
@@ -744,7 +769,7 @@ def get_month_attendance_details(start_date, end_date=None):
             JOIN users u ON a.user_id = u.id
             LEFT JOIN rates r ON u.id = r.user_id
             WHERE a.date >= ?
-        '''
+        '''.format(name=REPORT_NAME)
         params = [start_date]
         if end_date is not None:
             sql += 'AND a.date < ? '
@@ -967,7 +992,7 @@ def get_pending_correction_requests():
             SELECT cr.*, u.full_name
             FROM correction_requests cr
             JOIN users u ON cr.user_id = u.id
-            WHERE cr.status = 'PENDING'
+            WHERE cr.status = 'PENDING' AND COALESCE(u.is_active, 1) = 1
             ORDER BY cr.created_at DESC
         ''')
         rows = c.fetchall()
@@ -1043,7 +1068,7 @@ def get_advances(start_date, end_date, user_id=None):
     try:
         conn = get_connection()
         c = conn.cursor()
-        sql = '''SELECT a.id, a.user_id, a.amount, a.note, a.date, a.created_at, u.full_name
+        sql = f'''SELECT a.id, a.user_id, a.amount, a.note, a.date, a.created_at, {REPORT_NAME}
                  FROM advances a
                  JOIN users u ON a.user_id = u.id
                  WHERE a.status = 'ACTIVE' AND a.date >= ? AND a.date < ? '''
@@ -1122,7 +1147,7 @@ def get_payments(month, user_id=None):
     try:
         conn = get_connection()
         c = conn.cursor()
-        sql = '''SELECT p.id, p.user_id, p.month, p.amount, p.created_at, u.full_name
+        sql = f'''SELECT p.id, p.user_id, p.month, p.amount, p.created_at, {REPORT_NAME}
                  FROM payments p
                  JOIN users u ON p.user_id = u.id
                  WHERE p.status = 'ACTIVE' AND p.month = ? '''

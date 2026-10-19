@@ -185,7 +185,7 @@ bot.sent.clear()
 run(app.relink_callback(CallbackUpdate(FakeQuery(A1, "relink:ok:9000004", TextMessage())), FakeContext()))
 check("ему пришло «не удалось»",
       any(m['chat_id'] == 9000004 and m['text'] == msg.MSG_RELINK_FAILED for m in bot.sent))
-db.delete_user(9000004)
+db.deactivate_user(9000004)
 
 print("\n6. Кнопка на старом (недоступном) сообщении не теряет уведомление")
 req_id = db.create_correction_request(EMP, yesterday.isoformat(), '09:00', '18:00')

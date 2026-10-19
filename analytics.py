@@ -101,10 +101,12 @@ def month_payroll(start_date, _depth=0):
 
     people = {}
 
-    def person(user_id, name):
+    # `active` is False for a deleted employee - still here, so their
+    # balance can be paid, but no longer on the staff.
+    def person(user_id, name, active):
         return people.setdefault(user_id, {
-            'user_id': user_id, 'name': name, 'days': 0, 'minutes': 0.0, 'wage': 0.0,
-            'base': 0.0, 'overtime': 0.0, 'advance': 0.0,
+            'user_id': user_id, 'name': name, 'active': bool(active),
+            'days': 0, 'minutes': 0.0, 'wage': 0.0, 'base': 0.0, 'overtime': 0.0, 'advance': 0.0,
             'carry_in': 0.0, 'paid': 0.0, 'settled': False,
         })
 
@@ -113,10 +115,10 @@ def month_payroll(start_date, _depth=0):
         previous = month_payroll(previous_start, _depth + 1)
         for entry in previous['employees']:
             if entry['settled'] and round(entry['to_pay'], 2):
-                person(entry['user_id'], entry['name'])['carry_in'] = entry['to_pay']
+                person(entry['user_id'], entry['name'], entry['active'])['carry_in'] = entry['to_pay']
 
     for row in rows:
-        entry = person(row['user_id'], row['full_name'])
+        entry = person(row['user_id'], row['full_name'], row['is_active'])
         if not (row['check_in'] and row['check_out']):
             continue
         total = row['total_wage'] or 0
@@ -132,10 +134,10 @@ def month_payroll(start_date, _depth=0):
         entry['minutes'] += (row['check_out'] - row['check_in']).total_seconds() / 60.0
 
     for advance in advances:
-        person(advance['user_id'], advance['full_name'])['advance'] += advance['amount']
+        person(advance['user_id'], advance['full_name'], advance['is_active'])['advance'] += advance['amount']
 
     for payment in payments:
-        entry = person(payment['user_id'], payment['full_name'])
+        entry = person(payment['user_id'], payment['full_name'], payment['is_active'])
         entry['paid'] += payment['amount']
         entry['settled'] = True
 

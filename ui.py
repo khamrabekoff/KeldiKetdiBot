@@ -471,10 +471,15 @@ def admin_employee_list():
     return text, InlineKeyboardMarkup(keyboard)
 
 
+DELETE_KEEPS_HISTORY = ("<i>Ish kunlari, avanslari va qoldig'i hisobotlarda «(o'chirilgan)» "
+                        "belgisi bilan qoladi — qoldiqni «💰 To'lov» orqali to'lash mumkin. "
+                        "Botdan esa u endi foydalana olmaydi.</i>")
+
+
 def employee_delete_card(emp_id):
     """What an employee leaves behind: this month's and last month's pay and
     balance, and any day still open. Shown before a delete and sent to the
-    admins after it, because the reports drop a deleted person entirely."""
+    other admins after it."""
     emp = db.get_user(emp_id)
     if not emp:
         return "❌ Xodim topilmadi."
@@ -760,7 +765,8 @@ def admin_report_keyboard(ym):
 # report. A settled month passes whatever is left of its balance on to the next.
 
 def payment_list_card(start_date):
-    """Who still has to be paid for a month, one button per employee."""
+    """Who still has to be paid for a month, one button per employee. A
+    deleted employee is listed only while there is a balance to settle."""
     payroll = analytics.month_payroll(start_date)
     ym = start_date.strftime('%Y-%m')
     text = (
@@ -777,6 +783,8 @@ def payment_list_card(start_date):
             f"💰 Jami to'lash kerak: <b>{fmt_money(payroll['totals']['to_pay'])}</b>"
         )
         for entry in payroll['employees']:
+            if not entry['active'] and round(entry['to_pay'], 2) == 0:
+                continue
             mark = "✅" if is_paid_off(entry) else "💰"
             keyboard.append([InlineKeyboardButton(
                 f"{mark} {entry['name']} · {fmt_money(entry['to_pay'])}",
