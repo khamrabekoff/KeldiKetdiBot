@@ -3,6 +3,10 @@
 MSG_WELCOME = "Assalomu alaykum! 'Keldi-ketdi' botiga xush kelibsiz.\nIltimos, telefon raqamingizni yuboring."
 MSG_SEND_CONTACT = "📱 Telefon raqamni yuborish"
 MSG_NOT_AUTHORIZED = "Kechirasiz, siz xodimlar ro'yxatida yo'qsiz. Rahbar bilan bog'laning."
+MSG_OWN_CONTACT_ONLY = "Iltimos, o'z raqamingizni pastdagi «📱 Telefon raqamni yuborish» tugmasi orqali yuboring."
+MSG_RELINK_SENT = ("Bu raqam xodimlar ro'yxatida bor, lekin boshqa Telegram akkauntga ulangan.\n"
+                   "Rahbarga so'rov yuborildi — u tasdiqlagach, bot sizga xabar beradi.")
+MSG_RELINK_WAIT = "So'rovingiz rahbarga yuborilgan. Tasdiqlashini kuting."
 MSG_AUTH_SUCCESS = "Xush kelibsiz, {name}!"
 MSG_ALREADY_REGISTERED = "Siz allaqachon ro'yxatdan o'tgansiz."
 MSG_ADMIN_WELCOME = "Xush kelibsiz, Administrator! Buyruq kuting."

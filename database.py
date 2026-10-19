@@ -165,6 +165,7 @@ def init_db():
             ("attendance", "overtime_wage", "REAL DEFAULT 0"),
             ("pending_users", "overtime_per_minute", "REAL DEFAULT 0"),
             ("advances", "created_by", "INTEGER"),  # admin who entered it; NULL = the employee
+            ("attendance", "open_alerted", "INTEGER DEFAULT 0"),  # left open overnight, admins told
         ]
         for table, col, col_def in new_cols:
             try:
@@ -388,6 +389,117 @@ def get_user_by_phone(phone):
     except Exception as e:
         logger.error(f"Error getting user by phone: {e}")
         return None
+
+
+def get_employee_by_phone(phone):
+    """The employee whose stored number ends like `phone`, or None. Admins
+    are never matched - theirs is the placeholder 'AdminPhone'."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE role='employee' AND phone LIKE ?",
+                  (f'%{phone[-9:]}',))
+        user = c.fetchone()
+        conn.close()
+        return user
+    except Exception as e:
+        logger.error(f"Error getting employee by phone: {e}")
+        return None
+
+
+# Every table that points at an employee through user_id
+USER_ID_TABLES = ('rates', 'attendance', 'correction_requests', 'advances', 'payments')
+
+
+def relink_user(old_id, new_id):
+    """Move an employee, with all their history, to a new Telegram account.
+
+    Telegram ids never change, so a person who deleted their account and made
+    a new one on the same number is a stranger to the bot until this runs.
+    Returns False if the old id is gone or the new one is already taken."""
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM users WHERE id = ?', (new_id,))
+        if c.fetchone():
+            return False
+        c.execute('UPDATE users SET id = ? WHERE id = ?', (new_id, old_id))
+        if c.rowcount == 0:
+            return False
+        for table in USER_ID_TABLES:  # fixed literals, not user input
+            c.execute(f'UPDATE {table} SET user_id = ? WHERE user_id = ?', (new_id, old_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error relinking user {old_id} -> {new_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_unreported_open_shifts(before_day):
+    """Employees' days before `before_day` that were checked into and never
+    out, and that nobody has been told about yet. Such a day earns nothing
+    until someone puts the leaving time in."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT a.id, a.user_id, u.full_name, a.date, a.check_in
+            FROM attendance a
+            JOIN users u ON a.user_id = u.id
+            WHERE u.role = 'employee' AND a.check_out IS NULL
+              AND a.date < ? AND COALESCE(a.open_alerted, 0) = 0
+            ORDER BY u.full_name, a.date
+        ''', (before_day,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting open shifts: {e}")
+        return []
+
+
+def get_open_days(user_id, before_day):
+    """One person's days before `before_day` with a check-in and no check-out,
+    oldest first."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT * FROM attendance WHERE user_id = ? AND check_out IS NULL '
+                  'AND check_in IS NOT NULL AND date < ? ORDER BY date', (user_id, before_day))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting open days for {user_id}: {e}")
+        return []
+
+
+def mark_open_shifts_reported(attendance_ids):
+    if not attendance_ids:
+        return
+    conn = get_connection()
+    try:
+        conn.executemany('UPDATE attendance SET open_alerted = 1 WHERE id = ?',
+                         [(i,) for i in attendance_ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_admin_ids():
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE role='admin'")
+        ids = [row['id'] for row in c.fetchall()]
+        conn.close()
+        return ids
+    except Exception as e:
+        logger.error(f"Error getting admins: {e}")
+        return []
 
 
 def delete_user(user_id):

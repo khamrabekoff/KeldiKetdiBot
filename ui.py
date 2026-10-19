@@ -471,6 +471,67 @@ def admin_employee_list():
     return text, InlineKeyboardMarkup(keyboard)
 
 
+def employee_delete_card(emp_id):
+    """What an employee leaves behind: this month's and last month's pay and
+    balance, and any day still open. Shown before a delete and sent to the
+    admins after it, because the reports drop a deleted person entirely."""
+    emp = db.get_user(emp_id)
+    if not emp:
+        return "❌ Xodim topilmadi."
+    today = utils.get_now().date()
+    this_month = today.replace(day=1)
+    last_month = (this_month - timedelta(days=1)).replace(day=1)
+
+    text = f"👤 <b>{html.escape(emp['full_name'])}</b>"
+    if emp['phone']:
+        text += f" · <code>+{html.escape(str(emp['phone']).lstrip('+'))}</code>"
+    text += "\n"
+    for start in (last_month, this_month):
+        entry = analytics.employee_month(emp_id, start)
+        if not entry:
+            continue
+        text += f"\n📅 <b>{fmt_month(start)}</b>\n<code>Kunlar:  {entry['days']}</code>\n"
+        text += f"<code>Hisob:   {fmt_money(entry['wage'])}</code>\n"
+        if entry['carry_in']:
+            text += f"<code>O'tgan:  {fmt_money(entry['carry_in'])}</code>\n"
+        if entry['advance']:
+            text += f"<code>Avans:   {fmt_money(entry['advance'])}</code>\n"
+        if entry['paid']:
+            text += f"<code>To'lov:  {fmt_money(entry['paid'])}</code>\n"
+        text += f"<code>Qoldiq:  {fmt_money(entry['to_pay'])}</code>\n"
+
+    open_days = db.get_open_days(emp_id, today)
+    if open_days:
+        dates = ', '.join(r['date'].strftime('%d.%m.%y') for r in open_days[:10])
+        more = f" va yana {len(open_days) - 10} ta" if len(open_days) > 10 else ""
+        text += f"\n⚠️ Yopilmagan kunlar ({len(open_days)}): {dates}{more}\n"
+    return text.rstrip('\n')
+
+
+def open_shifts_admin_text(rows):
+    """Digest of days left open overnight, grouped by employee."""
+    text = ("⚠️ <b>«Ketdim» bosilmagan kunlar</b>\n"
+            "<i>Bu kunlar uchun ish haqi hisoblanmadi.</i>\n")
+    by_person = {}
+    for r in rows:
+        by_person.setdefault(r['full_name'], []).append(r)
+    for name, days in by_person.items():
+        text += f"\n👤 <b>{html.escape(name)}</b>\n"
+        for r in days:
+            came = r['check_in'].strftime('%H:%M') if r['check_in'] else '--:--'
+            text += f"<code>  {r['date'].strftime('%d.%m.%y')}  keldi {came}, ketmadi</code>\n"
+    text += ("\nTuzatish: Hodimlar → xodim → 📝 Vaqt (⚠️ belgili kunlar).\n"
+             "<i>Yaqin kunlar uchun xodimning o'zi ham «📝 Tuzatish» so'rovini yuborishi mumkin.</i>")
+    return text
+
+
+def open_shifts_employee_text(rows):
+    """For days still inside the employee's own correction window."""
+    dates = ', '.join(r['date'].strftime('%d.%m') for r in rows)
+    return (f"⚠️ {dates} kuni «Ketdim» bosilmagan — bu kun uchun ish haqi hisoblanmadi.\n\n"
+            "Qachon ketganingizni «📝 Tuzatish» orqali yuboring, rahbar tasdiqlaydi.")
+
+
 def admin_employee_card(emp_id):
     """Detail card for one employee: contact, rate, live status, month totals."""
     emp = db.get_user(emp_id)
