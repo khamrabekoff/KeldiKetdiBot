@@ -5,7 +5,8 @@ os.environ['ADMIN_SECRET'] = 'test_secret'
 os.environ['DATABASE_PATH'] = os.path.join(tempfile.mkdtemp(), 'test.db')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import database as db
+import datetime as dt
+import database as db, utils
 
 db.init_db()
 failures = []
@@ -29,5 +30,15 @@ conn = db.get_connection()
 conn.execute("UPDATE pending_replies SET created_at = datetime('now', '-3 hours')")
 conn.commit(); conn.close()
 check("stale ones are dropped", db.get_pending_replies(min_age_sec=0) == [])
+
+now_utc = dt.datetime.now(dt.timezone.utc)
+def off(sent):
+    return abs((utils.press_time(sent) - utils.get_now()).total_seconds())
+pressed = utils.press_time(now_utc - dt.timedelta(minutes=7))
+check("a press processed 7 min late is stamped with the press time",
+      abs((utils.get_now() - pressed).total_seconds() - 420) < 5)
+check("no message time -> now", off(None) < 5)
+check("older than 3 h -> now", off(now_utc - dt.timedelta(hours=5)) < 5)
+check("in the future -> now", off(now_utc + dt.timedelta(minutes=30)) < 5)
 
 sys.exit(0 if not failures else 1)

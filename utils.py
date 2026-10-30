@@ -66,6 +66,26 @@ def get_now():
     return datetime.now(TZ_UZ).replace(tzinfo=None)
 
 
+def press_time(sent_at, max_age=timedelta(hours=3)):
+    """When the person pressed the button, not when we got round to it.
+
+    A webhook that waits behind a slow update (or that Telegram re-delivers
+    after a timeout) is processed minutes late; stamping it with get_now()
+    then books the arrival minutes late. `sent_at` is Telegram's own time of
+    the message. Anything missing, in the future or older than `max_age` falls
+    back to now - a very old update is not a press we should backdate."""
+    now = get_now()
+    if sent_at is None:
+        return now
+    try:
+        pressed = sent_at.astimezone(TZ_UZ).replace(tzinfo=None)
+    except (ValueError, AttributeError):
+        return now
+    if now - max_age <= pressed <= now:
+        return pressed
+    return now
+
+
 def next_month(day):
     """First day of the month after `day`'s - the exclusive end of its month."""
     return (day.replace(day=28) + timedelta(days=4)).replace(day=1)

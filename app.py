@@ -548,7 +548,7 @@ async def secret_admin_claim(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def check_in_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = db.get_user(user_id)
-    now = utils.get_now()
+    now = utils.press_time(update.message.date)
     result = db.check_in_user(user_id, now)
 
     if result['success']:
@@ -570,7 +570,7 @@ async def check_in_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_out_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = db.get_user(user_id)
-    now = utils.get_now()
+    now = utils.press_time(update.message.date)
     result = db.check_out_user(user_id, now)
 
     if result['success']:
