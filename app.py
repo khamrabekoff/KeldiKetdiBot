@@ -2504,8 +2504,11 @@ async def _alert_open_shifts():
         if not recent:
             continue
         try:
+            # refresh the keyboard too: yesterday's KETDIM would otherwise
+            # stay on screen while today they are not clocked in
             await bot.send_message(chat_id=user_id,
-                                   text=ui.open_shifts_employee_text(recent))
+                                   text=ui.open_shifts_employee_text(recent),
+                                   reply_markup=ui.employee_keyboard(user_id))
         except Exception as e:
             logger.warning(f"Open-shift alert failed for employee {user_id}: {e}")
     logger.info(f"⚠️ Open shifts reported: {len(rows)} days, {delivered} admins")
@@ -2568,7 +2571,8 @@ async def _send_reminders_job(kind=None, dry_run=False):
             if dry_run:
                 continue
             try:
-                await bot.send_message(chat_id=emp['id'], text=text)
+                await bot.send_message(chat_id=emp['id'], text=text,
+                                       reply_markup=ui.employee_keyboard(emp['id']))
             except Exception as e:
                 logger.warning(f"{kind} reminder failed for {emp['full_name']} ({emp['id']}): {e}")
 
