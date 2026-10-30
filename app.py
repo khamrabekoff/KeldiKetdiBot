@@ -369,11 +369,39 @@ async def send_employee_home(update: Update, db_user, note=None):
     """Status card + the bottom keyboard, whose primary button reflects
     whether they're currently checked in."""
     text = ui.employee_status_card(db_user['id'], db_user['full_name'], note=note)
-    await update.message.reply_text(
-        text,
-        reply_markup=ui.employee_keyboard(db_user['id']),
-        parse_mode='HTML',
-    )
+    try:
+        await update.message.reply_text(
+            text,
+            reply_markup=ui.employee_keyboard(db_user['id']),
+            parse_mode='HTML',
+        )
+    except NetworkError as e:
+        # The press already took effect; only the reply was lost. Without it
+        # the keyboard stays on the old button (KELDIM after a check-in) and
+        # the employee presses it again. Keep it and send it on later traffic.
+        logger.warning(f"Status card for {db_user['id']} not delivered, queued: {e}")
+        db.save_pending_reply(db_user['id'], note)
+        return
+    db.clear_pending_reply(db_user['id'])
+
+
+async def _flush_pending_replies():
+    bot = telegram_app.bot
+    for row in db.get_pending_replies():
+        user = db.get_user(row['user_id'])
+        if not user:
+            db.clear_pending_reply(row['user_id'])
+            continue
+        try:
+            await bot.send_message(
+                chat_id=user['id'],
+                text=ui.employee_status_card(user['id'], user['full_name'], note=row['note']),
+                reply_markup=ui.employee_keyboard(user['id']),
+                parse_mode='HTML',
+            )
+            db.clear_pending_reply(user['id'])
+        except Exception as e:
+            logger.warning(f"Queued card for {user['id']} still not delivered: {e}")
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -530,6 +558,9 @@ async def check_in_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = f"⚠️ <i>Kechikdingiz ({settings.get_time_str('late_after')} dan keyin).</i>"
         else:
             note = "<i>Hayrli ish!</i>"
+    elif db.is_user_checked_in(user_id):
+        note = ("⚠️ <i>Siz allaqachon ishdasiz. Ishdan ketayotgan bo'lsangiz, "
+                "«🚪 KETDIM» tugmasini bosing.</i>")
     else:
         note = f"⚠️ <i>{result['message']}</i>"
 
@@ -550,6 +581,9 @@ async def check_out_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = "<i>Ish kuningiz uchun rahmat!</i>"
     else:
         note = f"⚠️ <i>{result['message']}</i>"
+        if db.get_open_days(user_id, now.date()):
+            note += ("\n⚠️ <i>Oldingi kun yopilmagan. Qachon ketganingizni "
+                     "«📝 Tuzatish» orqali yuboring.</i>")
 
     await send_employee_home(update, user, note=note)
 
@@ -2359,6 +2393,11 @@ def webhook():
         return 'ERROR', 500
 
     # After the user has had their reply, not before.
+    try:
+        if db.get_pending_replies(max_age_min=120):
+            run_sync(_flush_pending_replies(), timeout=40)
+    except Exception as e:
+        logger.warning(f"Pending reply flush skipped: {type(e).__name__}: {e}")
     _maybe_send_due_reminders()
     return 'OK', 200
 

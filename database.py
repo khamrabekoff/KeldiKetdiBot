@@ -159,6 +159,16 @@ def init_db():
             )
         ''')
 
+        # Status cards the proxy refused to carry (see send_employee_home); sent
+        # again on later traffic.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS pending_replies (
+                user_id INTEGER PRIMARY KEY,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance(user_id, date)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_advances_user_date ON advances(user_id, date)')
@@ -530,6 +540,46 @@ def mark_open_shifts_reported(attendance_ids):
         conn.commit()
     finally:
         conn.close()
+
+
+def save_pending_reply(user_id, note):
+    try:
+        conn = get_connection()
+        conn.execute('INSERT OR REPLACE INTO pending_replies (user_id, note) VALUES (?, ?)',
+                     (user_id, note))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving pending reply for {user_id}: {e}")
+
+
+def clear_pending_reply(user_id):
+    try:
+        conn = get_connection()
+        conn.execute('DELETE FROM pending_replies WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error clearing pending reply for {user_id}: {e}")
+
+
+def get_pending_replies(min_age_sec=30, max_age_min=120):
+    """Replies old enough that the proxy burst has passed, young enough to
+    still mean something. Older ones are dropped."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM pending_replies WHERE created_at < datetime('now', ?)",
+                  (f'-{int(max_age_min)} minutes',))
+        c.execute("SELECT user_id, note FROM pending_replies WHERE created_at <= datetime('now', ?)",
+                  (f'-{int(min_age_sec)} seconds',))
+        rows = c.fetchall()
+        conn.commit()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error reading pending replies: {e}")
+        return []
 
 
 def save_admin_copy(kind, ref, chat_id, message_id, text):
